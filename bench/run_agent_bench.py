@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from infrastructure.agent_tools import build_tools, cache_stats, clear_cache
 from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ProductCatalogRepository
+from infrastructure.ecommerce_adapter import ECommerceAdapter
 from infrastructure.indexer import LocalHybridSearchEngine
 from infrastructure.scraper import PlaywrightScraper
 from use_cases import build_discovery_agent, build_synthesis_agent
@@ -213,7 +214,8 @@ async def main(turns: int, provider: str, model: str) -> Dict[str, Any]:
     search_engine = LocalHybridSearchEngine(repo)
     scraper = PlaywrightScraper()
     await scraper.start()
-    tools = build_tools(search_engine, scraper)
+    ecommerce = ECommerceAdapter()
+    tools = build_tools(search_engine, scraper=scraper, ecommerce_adapter=ecommerce)
 
     client = build_chat_client(provider, model)
     print(f"[bench] provider={provider} model={model}")

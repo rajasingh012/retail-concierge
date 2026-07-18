@@ -1,8 +1,8 @@
 """MAF tool wrappers around infrastructure services.
 
-Exposes the BM25 search engine and Playwright scraper as plain
-callables decorated with `@tool` so the framework auto-registers
-them and generates the JSON schema from type hints + docstrings.
+Exposes the BM25 search engine, generic Playwright scraper, and the
+E-Commerces-WebScraper adapter (vendor/ecommerce-scraper submodule)
+as plain callables decorated with `@tool` for automatic schema registration.
 
 Tool results are cached in-process via cachetools.TTLCache so
 multi-turn agent loops (Discovery → Synthesis) don't re-hit the
@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agent_framework import tool
 from cachetools import TTLCache
 
+from infrastructure.ecommerce_adapter import ECommerceAdapter
 from infrastructure.indexer import LocalHybridSearchEngine
 from infrastructure.scraper import PlaywrightScraper, payload_to_json
 
@@ -45,9 +46,18 @@ def clear_cache() -> None:
 
 def build_tools(
     search_engine: LocalHybridSearchEngine,
-    scraper: PlaywrightScraper,
+    scraper: PlaywrightScraper | None = None,
+    ecommerce_adapter: ECommerceAdapter | None = None,
 ) -> List[Any]:
-    """Bind infrastructure instances into MAF tool definitions."""
+    """Bind infrastructure instances into MAF tool definitions.
+
+    Args:
+        search_engine: BM25 search engine (required — local catalog lookup).
+        scraper: Generic Playwright scraper (optional — for custom selectors).
+        ecommerce_adapter: E-Commerces-WebScraper adapter (optional —
+            provides Amazon/AliExpress/Shein/Shopee scraping without
+            manual selector config).
+    """
 
     @tool
     async def search_catalog(query: str, limit: int = 10) -> str:
@@ -78,7 +88,10 @@ def build_tools(
 
     @tool
     async def fetch_product_page(url: str, selectors: Dict[str, str]) -> str:
-        """Fetch a live marketplace product page using Playwright.
+        """Fetch a live marketplace product page using Playwright and custom selectors.
+
+        For Amazon/AliExpress/Shein/Shopee/Mercado Livre, prefer
+        `fetch_product_from_site` instead — it has pre-configured selectors.
 
         Args:
             url: Absolute URL to the product page.
@@ -90,6 +103,8 @@ def build_tools(
         Returns:
             JSON string describing the parsed ProductPayload.
         """
+        if scraper is None:
+            return json.dumps({"error": "Generic scraper not configured. Use fetch_product_from_site instead."})
         key = _cache_key("fetch_product_page", url, json.dumps(selectors, sort_keys=True))
         cached = _TOOL_CACHE.get(key)
         if cached is not None:
@@ -110,13 +125,47 @@ def build_tools(
         Returns:
             Full page HTML as a string.
         """
+        if scraper is None:
+            return json.dumps({"error": "Generic scraper not configured. Use fetch_product_from_site instead."})
         key = _cache_key("fetch_html", url, wait_selector)
         cached = _TOOL_CACHE.get(key)
         if cached is not None:
             return cached
         result = await scraper.fetch_html(url, wait_selector or None)
-        # Cap HTML in cache (memory safety — pages can be MBs)
         _TOOL_CACHE[key] = result[:200_000]
         return result
 
-    return [search_catalog, fetch_product_page, fetch_html]
+    @tool
+    async def fetch_product_from_site(url: str, platform: str = "") -> str:
+        """Fetch a product page from a major ecommerce site using pre-configured selectors.
+
+        Uses the E-Commerces-WebScraper (vendor/ecommerce-scraper submodule).
+        Handles Amazon, AliExpress, Mercado Livre, Shein, and Shopee.
+        No manual CSS selectors needed — the scraper knows each site's structure.
+
+        Args:
+            url: Full product URL (e.g. "https://amazon.com/dp/B0ABC123").
+            platform: Site name ("amazon", "aliexpress", "mercadolivre", "shein",
+                "shopee"). If empty, auto-detects from the URL.
+
+        Returns:
+            JSON with title, price, description, and metadata.
+        """
+        if ecommerce_adapter is None:
+            return json.dumps({"error": "E-Commerces-WebScraper adapter not configured."})
+        pl = platform if platform else None
+        key = _cache_key("fetch_product_from_site", url, pl or "")
+        cached = _TOOL_CACHE.get(key)
+        if cached is not None:
+            return cached
+        result = await ecommerce_adapter.fetch_json(url, platform=pl)
+        _TOOL_CACHE[key] = result
+        return result
+
+    # Build the tool list — include ecommerce adapter tool only if configured
+    tools = [search_catalog]
+    if ecommerce_adapter is not None:
+        tools.append(fetch_product_from_site)
+    if scraper is not None:
+        tools.extend([fetch_product_page, fetch_html])
+    return tools

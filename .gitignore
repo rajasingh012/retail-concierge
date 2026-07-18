@@ -36,3 +36,9 @@ bench/results/
 
 # OS
 Thumbs.db
+
+# E-Commerces-WebScraper submodule runtime artifacts
+vendor/ecommerce-scraper/Outputs/
+vendor/ecommerce-scraper/Logs/
+vendor/ecommerce-scraper/Inputs/
+vendor/ecommerce-scraper/.env

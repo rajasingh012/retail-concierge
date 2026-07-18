@@ -1,0 +1,3 @@
+[submodule "vendor/ecommerce-scraper"]
+	path = vendor/ecommerce-scraper
+	url = https://github.com/BrenoFariasdaSilva/E-Commerces-WebScraper.git
