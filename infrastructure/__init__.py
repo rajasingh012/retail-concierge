@@ -1,0 +1,1 @@
+"""Infrastructure layer: outer drivers (DB, index, scraper, tool wraps)."""

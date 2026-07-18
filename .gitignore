@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local SQLite catalogs (state, not source)
+retail_catalog.db
+*.db-journal
+
+# Tool-result cache is in-process, no on-disk state to ignore
+
+# Bench results (regenerated each run)
+bench/results/
+!bench/results/.gitkeep
+
+# Local env / secrets
+.env
+.env.local
+
+# OS
+Thumbs.db
