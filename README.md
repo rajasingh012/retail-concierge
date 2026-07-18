@@ -2,21 +2,27 @@
 
 Multi-agent retail assistant on AMD Radeon ROCm. Two MAF agents (Discovery → Synthesis) over a BM25 + SQLite catalog, talking to vLLM on an AMD Developer Cloud MI300X droplet.
 
-## Run
+## Quick start
 
 ```bash
-pip install -r requirements.txt
-playwright install chromium
+git clone https://github.com/rajasingh012/retail-concierge.git
+cd retail-concierge
+
+# Install deps (uv ~10× faster than pip; uv.lock ensures reproducibility)
+uv sync
+
+# Install Playwright browsers
+uv run playwright install chromium
 
 # AMD Dev Cloud MI300X (judge demo)
 ./scripts/serve-vllm-rocm.sh        # in one terminal, after SSH'ing into the droplet
-RETAIL_PROVIDER=vllm RETAIL_BASE_URL=http://<droplet-ip>:8000/v1 \
+RETAIL_PROVIDER=vllm RETAIL_BASE_URL=http://<droplet>:8000/v1 \
 RETAIL_MODEL=google/gemma-3-27b-it \
-    PYTHONPATH=. python main.py     # on your laptop
+    uv run python main.py           # on your laptop
 
 # Local-dev fallback (no GPU droplet needed)
 RETAIL_PROVIDER=deepseek RETAIL_MODEL=deepseek-chat \
-    DEEPSEEK_API_KEY=*** PYTHONPATH=. python main.py
+    DEEPSEEK_API_KEY=*** uv run python main.py
 ```
 
 ## Docs

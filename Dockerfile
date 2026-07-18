@@ -32,9 +32,11 @@ RUN pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/rocm7.0 \
     && pip install --no-cache-dir vllm
 
-# 3. App deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 2. App deps
+COPY requirements.txt pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system -r requirements.txt \
+    && pip uninstall --quiet -y uv || true
 
 # 4. App code
 COPY . .

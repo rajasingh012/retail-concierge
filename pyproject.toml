@@ -1,0 +1,36 @@
+[project]
+name = "retail-concierge"
+version = "0.1.0"
+description = "Multi-agent retail assistant on AMD Radeon ROCm (Microsoft Agent Framework + vLLM on AMD Developer Cloud MI300X)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [
+    { name = "rajasingh012" },
+]
+keywords = ["multi-agent", "rag", "amd", "rocm", "vllm", "microsoft-agent-framework"]
+
+dependencies = [
+    "agent-framework>=1.0.0",
+    "openai>=1.40.0",
+    "rank-bm25>=0.2.2",
+    "playwright>=1.45.0",
+    "cachetools>=5.3.0",
+]
+
+[project.urls]
+Repository = "https://github.com/rajasingh012/retail-concierge"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["domain", "use_cases", "infrastructure"]
+
+# Note: torch / vllm are NOT project dependencies.
+# - On the AMD Dev Cloud 1-Click image, vLLM 0.23.0 + PyTorch ROCm are
+#   pre-installed inside the Docker container — no install needed.
+# - Local devs without ROCm use DeepSeek via the OpenAI SDK (already covered).
+# - The Dockerfile in this repo installs PyTorch ROCm separately as a
+#   fallback for non-1-Click environments.
