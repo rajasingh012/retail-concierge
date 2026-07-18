@@ -5,7 +5,9 @@
 ```
 domain/         pure entities, no framework imports
 use_cases/      MAF ChatAgents — depend on ChatModelClient Protocol
-infrastructure/ outer drivers (DB, index, scraper, chat clients, tool cache)
+infrastructure/ outer drivers (DB, index, scraper, chat clients, tool cache,
+                ecommerce adapter)
+vendor/         git submodule — E-Commerces-WebScraper (pre-built scrapers)
 main.py         composition root
 bench/          synthetic agent-loop benchmark
 scripts/        vLLM launcher + droplet firewall lockdown
@@ -36,22 +38,24 @@ Both speak the OpenAI Chat Completions wire protocol — agent code is identical
 | Agent | Role | Tools |
 |---|---|---|
 | `DiscoveryAgent` | Extract structured JSON brief from free-form user input | none |
-| `SynthesisAgent` | Rank candidates against the brief | search_catalog, fetch_product_page, fetch_html |
+| `SynthesisAgent` | Rank candidates against the brief | search_catalog, fetch_product_from_site, fetch_product_page, fetch_html |
 
 ## Tool layer
 
-`build_tools()` in `infrastructure/agent_tools.py` returns three MAF-registered tools:
+`build_tools()` in `infrastructure/agent_tools.py` registers these tools with MAF:
+
 - `search_catalog(query, limit)` — BM25 exact-keyword over local SQLite
-- `fetch_product_page(url, selectors)` — Playwright parse to ProductPayload
+- `fetch_product_from_site(url, platform)` — **primary tool for Amazon/AliExpress/etc.** Delegates to the `vendor/ecommerce-scraper` submodule. No CSS selectors needed — the submodule's Amazon.py, AliExpress.py, etc. have site-specific selectors built in. Runs inside `asyncio.to_thread()` since the submodule uses sync Playwright.
+- `fetch_product_page(url, selectors)` — fallback generic Playwright (manual selectors)
 - `fetch_html(url, wait_selector)` — raw HTML with optional wait
 
-All tool results are cached in-process via `cachetools.TTLCache(maxsize=512, ttl=300)`.
+All tool results cached in-process via `cachetools.TTLCache(maxsize=512, ttl=300)`.
 
 ## Storage
 
 - **SQLite** (`./retail_catalog.db`) — products table with `structured_data` JSON column, queried via `json_extract` (SQLite JSON1)
 - **BM25Okapi corpus** — rebuilt on startup from the SQLite catalog, kept in-memory
-- **Playwright profile** — persistent chromium context at `/home/rajasingh/.mozilla/edge_profile`
+- **Playwright profile** — persistent chromium context at `/home/rajasingh/.mozilla/edge_profile` (falls back to submodule's Chrome profile path)
 
 All state lives on the AMD GPU droplet's local NVMe. No external object store.
 
@@ -64,8 +68,15 @@ user message
 DiscoveryAgent  ──► JSON brief (intent, brands, budget_max, must_have, …)
    │
    ▼
-SynthesisAgent  ──► tool calls (search_catalog → BM25 → SQLite)
-                              (fetch_product_page → Playwright → live sites)
+SynthesisAgent  ──► tool calls
+                      │
+                      ├── search_catalog  ──► BM25 ──► SQLite (local catalog)
+                      │
+                      ├── fetch_product_from_site   ──► Amazon/AliExpress/Shein/etc.
+                      │                              (vendor/ecommerce-scraper submodule,
+                      │                               sync Playwright → asyncio.to_thread)
+                      │
+                      └── fetch_product_page  ──► generic Playwright (fallback, requires selectors)
    │
    ▼
 ranked recommendations with rationale
