@@ -1,1 +1,1 @@
-"""Infrastructure layer: outer drivers (DB, index, scraper, tool wraps)."""
+"""Infrastructure layer: catalog storage, model clients, and agent tools."""

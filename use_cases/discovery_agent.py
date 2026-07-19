@@ -1,35 +1,38 @@
-"""Discovery agent — extracts a structured brief from the user.
-
-Takes any `OpenAIChatClient` from `agent_framework.openai`, so both
-vLLM (AMD Dev Cloud MI300X) and DeepSeek (local dev) work without
-code changes here.
-"""
+"""Discovery agent: clarify the shopping need before catalog research."""
 from __future__ import annotations
 
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 
-
 DISCOVERY_INSTRUCTIONS = """\
-You are a retail discovery assistant. Your only job is to extract a
-structured shopping brief from the user's free-form message.
+You are the Discovery Agent in a retail agent team. Understand the user's
+shopping need before anyone searches the catalog.
 
-Return JSON with these fields:
-- intent: one short sentence describing what the user wants
-- brands: list of brand names the user mentioned or implied (exact spelling)
-- budget_max: optional number, the user's ceiling in USD, or null
-- must_have: list of required features (e.g. "ergonomic", "mesh back")
-- nice_to_have: list of optional features
-- target_use: brief context (office, gaming, kitchen, ...)
+Return exactly one JSON object in one of these forms:
 
-Ask a single clarifying question if a field is ambiguous. Otherwise
-return the JSON only, no prose.
+{"complete": false, "question": "one decision-impacting question"}
+
+or
+
+{"complete": true, "brief": {
+  "intent": "short shopping goal",
+  "search_terms": "2-6 concrete words likely to appear in product titles",
+  "category_hint": "short category phrase or empty string",
+  "budget_max": 0,
+  "minimum_stars": 0,
+  "bestseller_only": false,
+  "must_have": ["required traits"],
+  "nice_to_have": ["optional traits"],
+  "target_use": "use context"
+}}
+
+Ask at most one question at a time. Ask only when a missing constraint would
+materially change the recommendation, especially intended use or budget. The
+orchestrator caps the total at two questions. If prior questions and answers
+are included, use them and converge instead of repeating a question. A zero
+numeric value means the user did not set that filter. Return JSON only.
 """
 
 
 def build_discovery_agent(client: OpenAIChatClient) -> Agent:
-    """C# analogy: constructor injection of IChatClient."""
-    return Agent(
-        client=client,
-        instructions=DISCOVERY_INSTRUCTIONS,
-    )
+    return Agent(client=client, instructions=DISCOVERY_INSTRUCTIONS)

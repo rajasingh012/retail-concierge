@@ -1,34 +1,34 @@
 # RetailConcierge
 
-Multi-agent retail assistant on AMD Radeon ROCm. Two MAF agents (Discovery → Synthesis) over a BM25 + SQLite catalog, with live product lookups via the Amazon scraper in our vendored E-Commerces-WebScraper submodule. vLLM runs on an AMD Developer Cloud MI300X droplet.
+Collaborative retail recommendation agents built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. Discovery clarifies the request, Catalog Research gathers evidence from an offline Amazon dataset, and a Critic independently checks and ranks the recommendations.
 
-For this hackathon we ship with the **Amazon** scraper path. The submodule also includes AliExpress / Shein / Shopee / Mercado Livre scrapers — we don't disable them, just don't invoke them. Switching platforms is a one-line change in `ECommerceAdapter.fetch_product(url, platform="aliexpress")`.
+The application uses dataset snapshots, not live Amazon data. It does not claim current prices, availability, shipping, or product specifications absent from the catalog.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/rajasingh012/retail-concierge.git
 cd retail-concierge
-
-# Install deps (uv ~10× faster than pip; uv.lock ensures reproducibility)
 uv sync
 
-# Install Playwright browsers
-uv run playwright install chromium
+# Build the local catalog from the external dataset
+uv run python scripts/import_catalog.py \
+  --products /home/rajasingh/Downloads/archive/amazon_products.csv \
+  --categories /home/rajasingh/Downloads/archive/amazon_categories.csv
 
-# AMD Dev Cloud MI300X (judge demo)
-./scripts/serve-vllm-rocm.sh        # in one terminal, after SSH'ing into the droplet
-RETAIL_PROVIDER=vllm RETAIL_BASE_URL=http://<droplet>:8000/v1 \
+# Judge/demo backend: vLLM on AMD Developer Cloud
+RETAIL_PROVIDER=vllm \
+RETAIL_BASE_URL=http://<droplet-ip>:8000/v1 \
 RETAIL_MODEL=google/gemma-3-27b-it \
-    uv run python main.py           # on your laptop
+  uv run python main.py
 
-# Local-dev fallback (no GPU droplet needed)
+# Local development fallback
 RETAIL_PROVIDER=deepseek RETAIL_MODEL=deepseek-chat \
-    DEEPSEEK_API_KEY=*** uv run python main.py
+DEEPSEEK_API_KEY=*** uv run python main.py
 ```
 
-## Docs
+## Documentation
 
-- [architecture.md](architecture.md) — layers, agents, Protocol, data flow
-- [deploy.md](deploy.md) — AMD Dev Cloud bring-up, firewall, spending limits
-- [progress.md](progress.md) — what's next (P0/P1/P2)
+- [architecture.md](architecture.md) — agents, tools, storage, and data flow
+- [deploy.md](deploy.md) — catalog import and AMD MI300X deployment
+- [progress.md](progress.md) — forward-looking work only

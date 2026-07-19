@@ -7,7 +7,7 @@
 # with JupyterLab — use that directly. Build this image only if you're
 # running outside the 1-Click environment (e.g. local ROCm dev box).
 
-FROM rocm/dev-ubuntu-24.04:7.14.0
+FROM rocm/dev-ubuntu-24.04:7.2.4
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1 \
@@ -17,13 +17,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 1. System deps (Playwright libs; Chromium fetched at run time)
+# 1. Minimal host utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.10 python3.10-venv python3-pip \
         git curl ca-certificates \
-        libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-        libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-        libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. PyTorch ROCm wheel + vLLM (official selector; do not build from source)
@@ -32,11 +29,13 @@ RUN pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/rocm7.0 \
     && pip install --no-cache-dir vllm
 
-# 2. App deps
-COPY requirements.txt pyproject.toml uv.lock ./
+# 3. App deps
+COPY pyproject.toml uv.lock ./
 RUN pip install --no-cache-dir uv \
-    && uv pip install --system -r requirements.txt \
-    && pip uninstall --quiet -y uv || true
+    && uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirements.txt \
+    && pip install --no-cache-dir -r /tmp/requirements.txt \
+    && pip uninstall --quiet -y uv \
+    && rm -f /tmp/requirements.txt
 
 # 4. App code
 COPY . .

@@ -2,92 +2,68 @@
 
 ## Layers
 
-```
-domain/         pure entities, no framework imports
-use_cases/      MAF Agents — depend on OpenAIChatClient
-infrastructure/ outer drivers (DB, index, chat clients, tool cache,
-                ecommerce adapter)
-vendor/         git submodule — E-Commerces-WebScraper (Amazon + other sites;
-                we use Amazon only for this hackathon)
-main.py         composition root
-bench/          synthetic agent-loop benchmark
-scripts/        vLLM launcher + droplet firewall lockdown
-Dockerfile      ROCm 7.14.0 fallback image
+```text
+domain/          catalog evidence contracts
+use_cases/       Discovery, Catalog Research, and Critic agents
+infrastructure/  SQLite catalog, FTS5 search, MAF tools, chat client factory
+scripts/         dataset importer, vLLM launcher, droplet firewall
+bench/           collaboration benchmark and AMD metrics
+main.py          composition root and interactive orchestration
 ```
 
-Rules:
-- `domain/` has no `infrastructure` or `agent_framework` imports
-- `use_cases/` depends only on `OpenAIChatClient`, never a concrete SDK
-- `infrastructure/` owns all third-party libraries
+`domain/` has no framework or infrastructure imports. Agents receive Microsoft Agent Framework's `OpenAIChatClient`; vLLM and DeepSeek use the same OpenAI-compatible client.
 
-## LLM client layer
+## Agent collaboration
 
-The chat client is `agent_framework.openai.OpenAIChatClient` (Microsoft Agent
-Framework's native OpenAI-protocol client). Both backends speak the OpenAI
-Chat Completions wire protocol, so swapping them is just a `base_url` change
-in the factory — no code change in agents or tools.
-
-| Provider   | When                                  | Endpoint                          |
-|------------|---------------------------------------|-----------------------------------|
-| `vllm`     | AMD Dev Cloud MI300X (1-Click image)  | `http://localhost:8000/v1`        |
-| `deepseek` | Local dev (no GPU)                    | `https://api.deepseek.com/v1`     |
-
-Defined in `infrastructure/chat_clients.py` (single `build_chat_client(provider, model, **kw)`
-factory backed by a `PROVIDERS` registry).
-
-## Agents
-
-| Agent | Role | Tools |
+| Agent | Responsibility | Tools |
 |---|---|---|
-| `DiscoveryAgent` | Extract structured JSON brief from free-form user input | none |
-| `SynthesisAgent` | Rank candidates against the brief | search_catalog, fetch_product_from_site |
+| Discovery | Ask up to two decision-impacting questions and produce a structured brief | none |
+| Catalog Research | Query only the offline catalog and label evidence gaps | `find_categories`, `search_catalog` |
+| Critic | Reject unsupported matches and rank evidence against the brief | none |
 
-## Tool layer
+Agent handoffs are explicit JSON objects. The orchestrator parses each handoff before passing it to the next agent.
 
-`build_tools()` in `infrastructure/agent_tools.py` registers these tools with MAF:
+## Catalog
 
-- `search_catalog(query, limit)` — BM25 exact-keyword over local SQLite
-- `fetch_product_from_site(url, platform="amazon")` — Live Amazon lookup via
-  the `vendor/ecommerce-scraper` submodule. The submodule also includes
-  AliExpress / Shein / Shopee / Mercado Livre scrapers; this hackathon
-  uses Amazon only. Pass a different `platform=` value to switch. Runs
-  inside `asyncio.to_thread()` since the submodule uses sync Playwright.
+The external CSV dataset is imported once into `retail_catalog.db`. Neither the source CSV nor generated database is committed.
 
-All tool results cached in-process via `cachetools.TTLCache(maxsize=512, ttl=300)`.
+SQLite stores facts once:
 
-## Storage
+```text
+categories(id INTEGER PK, name UNIQUE)
+products(id INTEGER PK, asin UNIQUE, ..., category_id FK -> categories.id)
+product_fts(title, external content -> products.id)
+```
 
-- **SQLite** (`./retail_catalog.db`) — products table with `structured_data` JSON column, queried via `json_extract` (SQLite JSON1)
-- **BM25Okapi corpus** — rebuilt on startup from the SQLite catalog, kept in-memory
-
-All state lives on the AMD GPU droplet's local NVMe. No external object store.
+FTS5 searches product titles. SQL applies exact category, price, rating, bestseller, and result-limit filters before evidence enters model context. Products with zero dataset price are excluded from recommendations.
 
 ## Data flow
 
-```
-user message
-   │
-   ▼
-DiscoveryAgent  ──► JSON brief (intent, brands, budget_max, must_have, …)
-   │
-   ▼
-SynthesisAgent  ──► tool calls
-                      │
-                      ├── search_catalog  ──► BM25 ──► SQLite (local catalog)
-                      │
-                      └── fetch_product_from_site   ──► Amazon
-                                                       (vendor/ecommerce-scraper submodule,
-                                                        sync Playwright → asyncio.to_thread)
-   │
-   ▼
-ranked recommendations with rationale
+```text
+user request
+    |
+    v
+Discovery Agent -- optional questions --> structured brief
+    |
+    v
+Catalog Research Agent -- tools --> SQLite FTS5 + indexed filters
+    |                              (1.4M+ product dataset)
+    v
+research evidence + explicit evidence gaps
+    |
+    v
+Critic Agent --> ranked recommendation + dataset limitations
 ```
 
-## Bench evidence
+The system never claims live availability or current pricing. Prices, ratings, review counts, bestseller flags, and popularity are dataset snapshots.
 
-`bench/run_agent_bench.py` runs 5 Discovery→Synthesis turns and writes a JSON report to `bench/results/agent_bench_<timestamp>.json`. Captures:
+## Benchmark
 
-- per-turn latency (mean / median / best / worst)
-- tool-result cache effectiveness (size after last turn)
-- `rocm-smi` / `amd-smi` snapshots before & after
-- vLLM prefix-cache hit rate before & after (the headline AMD rubric number)
+`bench/run_agent_bench.py` runs five full collaborations and records:
+
+- end-to-end latency per scenario
+- clarification count
+- candidate and recommendation counts
+- catalog-tool cache hits and misses
+- AMD GPU snapshots when available
+- vLLM prefix-cache/request metrics when available

@@ -1,116 +1,119 @@
-"""MAF tool wrappers around infrastructure services.
-
-Exposes the BM25 search engine and the E-Commerces-WebScraper adapter
-(vendor/ecommerce-scraper submodule) as plain callables decorated with
-`@tool` for automatic schema registration.
-
-Tool results are cached in-process via cachetools.TTLCache so
-multi-turn agent loops (Discovery → Synthesis) don't re-hit the
-catalog or re-launch a Playwright page for identical inputs.
-"""
+"""Microsoft Agent Framework tools over the offline SQLite catalog."""
 from __future__ import annotations
 
-import hashlib
 import json
-from typing import Any, Dict, List
+from collections import OrderedDict
+from typing import Any
 
 from agent_framework import tool
-from cachetools import TTLCache
 
-from infrastructure.ecommerce_adapter import ECommerceAdapter
-from infrastructure.indexer import LocalHybridSearchEngine
+from infrastructure.database import ProductCatalogRepository
 
-
-# ---------- tool-result cache ----------
-# Sized to a single retail session: ~5 turns × ~3 tool calls each.
-# 5-minute TTL so stale prices/reviews eventually refresh.
-_TOOL_CACHE: TTLCache = TTLCache(maxsize=512, ttl=300)
+_CACHE_MAXSIZE = 512
+_TOOL_CACHE: OrderedDict[str, str] = OrderedDict()
+_CACHE_HITS = 0
+_CACHE_MISSES = 0
 
 
-def _cache_key(namespace: str, *parts: Any) -> str:
-    """Stable hash of (tool_name, args). Args must be JSON-serializable."""
-    raw = json.dumps(parts, sort_keys=True, default=str)
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-    return f"{namespace}:{digest}"
+def _cached(key: str, factory) -> str:
+    global _CACHE_HITS, _CACHE_MISSES
+    if key in _TOOL_CACHE:
+        _CACHE_HITS += 1
+        _TOOL_CACHE.move_to_end(key)
+        return _TOOL_CACHE[key]
+    _CACHE_MISSES += 1
+    value = factory()
+    _TOOL_CACHE[key] = value
+    if len(_TOOL_CACHE) > _CACHE_MAXSIZE:
+        _TOOL_CACHE.popitem(last=False)
+    return value
 
 
-def cache_stats() -> Dict[str, int]:
-    """Exposed for the bench script to report cache effectiveness."""
-    return {"size": len(_TOOL_CACHE), "maxsize": _TOOL_CACHE.maxsize}
+def cache_stats() -> dict[str, int]:
+    """Return cache evidence for benchmark reports."""
+    return {
+        "hits": _CACHE_HITS,
+        "misses": _CACHE_MISSES,
+        "size": len(_TOOL_CACHE),
+        "maxsize": _CACHE_MAXSIZE,
+    }
 
 
 def clear_cache() -> None:
+    """Clear cached tool results and counters."""
+    global _CACHE_HITS, _CACHE_MISSES
     _TOOL_CACHE.clear()
+    _CACHE_HITS = 0
+    _CACHE_MISSES = 0
 
 
-def build_tools(
-    search_engine: LocalHybridSearchEngine,
-    ecommerce_adapter: ECommerceAdapter | None = None,
-) -> List[Any]:
-    """Bind infrastructure instances into MAF tool definitions.
-
-    Args:
-        search_engine: BM25 search engine (required — local catalog lookup).
-        ecommerce_adapter: E-Commerces-WebScraper adapter (required for live
-            product lookups — provides Amazon/AliExpress/Shein/Shopee/
-            MercadoLivre scraping via the vendor submodule).
-    """
+def build_tools(repository: ProductCatalogRepository) -> list[Any]:
+    """Bind catalog queries into schema-aware MAF tools."""
 
     @tool
-    async def search_catalog(query: str, limit: int = 10) -> str:
-        """Search the local product catalog using exact-keyword BM25 ranking.
+    def find_categories(query: str, limit: int = 10) -> str:
+        """Find catalog categories and their integer IDs by name.
 
         Args:
-            query: Natural-language query. Brand names like 'Steelcase' or
-                'Herman Miller' match with high precision.
-            limit: Maximum number of hits to return (default 10).
+            query: Category name fragment such as "office" or "headphones".
+            limit: Maximum category matches to return, from 1 to 50.
 
         Returns:
-            JSON array of hits: [{"product_id": str, "title": str, "score": float}]
+            JSON array with category_id, category_name, and product_count.
         """
-        key = _cache_key("search_catalog", query, limit)
-        cached = _TOOL_CACHE.get(key)
-        if cached is not None:
-            return cached
-        hits = search_engine.search(query, limit=limit)
-        payload = json.dumps(
+        key = json.dumps(["find_categories", query, limit], ensure_ascii=False)
+        return _cached(
+            key,
+            lambda: json.dumps(
+                repository.find_categories(query, limit), ensure_ascii=False
+            ),
+        )
+
+    @tool
+    def search_catalog(
+        query: str,
+        category_id: int = 0,
+        max_price: float = 0,
+        min_stars: float = 0,
+        bestseller_only: bool = False,
+        limit: int = 10,
+    ) -> str:
+        """Search the offline Amazon catalog using title text and exact filters.
+
+        Args:
+            query: Discriminating title terms. Use fewer terms to broaden a search.
+            category_id: Exact category ID from find_categories; 0 means any category.
+            max_price: Maximum listed dataset price; 0 means no ceiling.
+            min_stars: Minimum rating from 0 to 5; 0 means no minimum.
+            bestseller_only: If true, return only products marked bestseller.
+            limit: Maximum products to return, from 1 to 50.
+
+        Returns:
+            JSON product evidence. Prices and ratings are dataset snapshots, not live data.
+        """
+        key = json.dumps(
             [
-                {"product_id": h.product_id, "title": h.title, "score": h.score}
-                for h in hits
+                "search_catalog", query, category_id, max_price, min_stars,
+                bestseller_only, limit,
             ],
             ensure_ascii=False,
         )
-        _TOOL_CACHE[key] = payload
-        return payload
+        return _cached(
+            key,
+            lambda: json.dumps(
+                [
+                    product.to_dict()
+                    for product in repository.search(
+                        query,
+                        category_id=category_id,
+                        max_price=max_price,
+                        min_stars=min_stars,
+                        bestseller_only=bestseller_only,
+                        limit=limit,
+                    )
+                ],
+                ensure_ascii=False,
+            ),
+        )
 
-    @tool
-    async def fetch_product_from_site(url: str, platform: str = "") -> str:
-        """Fetch a product page from a major ecommerce site using pre-configured selectors.
-
-        Uses the E-Commerces-WebScraper (vendor/ecommerce-scraper submodule).
-        Handles Amazon, AliExpress, Mercado Livre, Shein, and Shopee.
-        No manual CSS selectors needed — the scraper knows each site's structure.
-
-        Args:
-            url: Full product URL (e.g. "https://amazon.com/dp/B0ABC123").
-            platform: Site name ("amazon", "aliexpress", "mercadolivre", "shein",
-                "shopee"). If empty, auto-detects from the URL.
-
-        Returns:
-            JSON with title, price, description, and metadata.
-        """
-        if ecommerce_adapter is None:
-            return json.dumps({"error": "E-Commerces-WebScraper adapter not configured."})
-        pl = platform if platform else None
-        key = _cache_key("fetch_product_from_site", url, pl or "")
-        cached = _TOOL_CACHE.get(key)
-        if cached is not None:
-            return cached
-        result = await ecommerce_adapter.fetch_json(url, platform=pl)
-        _TOOL_CACHE[key] = result
-        return result
-
-    tools = [search_catalog]
-    if ecommerce_adapter is not None:
-        tools.append(fetch_product_from_site)
-    return tools
+    return [find_categories, search_catalog]
