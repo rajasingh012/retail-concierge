@@ -42,3 +42,6 @@ vendor/ecommerce-scraper/Outputs/
 vendor/ecommerce-scraper/Logs/
 vendor/ecommerce-scraper/Inputs/
 vendor/ecommerce-scraper/.env
+
+# Top-level Logs/ created by submodule's Logger redirect on stdout
+Logs/

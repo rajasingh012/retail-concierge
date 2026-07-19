@@ -1,13 +1,13 @@
 """Discovery agent — extracts a structured brief from the user.
 
-Depends on `ChatModelClient` (a Protocol), so any provider in
-infrastructure/chat_clients.PROVIDERS works without code changes here.
+Takes any `OpenAIChatClient` from `agent_framework.openai`, so both
+vLLM (AMD Dev Cloud MI300X) and DeepSeek (local dev) work without
+code changes here.
 """
 from __future__ import annotations
 
-from agent_framework import ChatAgent
-
-from infrastructure.chat_clients import ChatModelClient, ChatTurn
+from agent_framework import Agent
+from agent_framework.openai import OpenAIChatClient
 
 
 DISCOVERY_INSTRUCTIONS = """\
@@ -27,10 +27,9 @@ return the JSON only, no prose.
 """
 
 
-def build_discovery_agent(client: ChatModelClient) -> ChatAgent:
-    """C# analogy: constructor injection of IChatModelClient."""
-    return ChatAgent(
-        chat_client=client,                # Protocol-typed; any provider works
-        model=getattr(client, "model", ""),
+def build_discovery_agent(client: OpenAIChatClient) -> Agent:
+    """C# analogy: constructor injection of IChatClient."""
+    return Agent(
+        client=client,
         instructions=DISCOVERY_INSTRUCTIONS,
     )

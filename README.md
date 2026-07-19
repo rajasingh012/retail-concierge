@@ -1,6 +1,8 @@
 # RetailConcierge
 
-Multi-agent retail assistant on AMD Radeon ROCm. Two MAF agents (Discovery → Synthesis) over a BM25 + SQLite catalog, talking to vLLM on an AMD Developer Cloud MI300X droplet.
+Multi-agent retail assistant on AMD Radeon ROCm. Two MAF agents (Discovery → Synthesis) over a BM25 + SQLite catalog, with live product lookups via the Amazon scraper in our vendored E-Commerces-WebScraper submodule. vLLM runs on an AMD Developer Cloud MI300X droplet.
+
+For this hackathon we ship with the **Amazon** scraper path. The submodule also includes AliExpress / Shein / Shopee / Mercado Livre scrapers — we don't disable them, just don't invoke them. Switching platforms is a one-line change in `ECommerceAdapter.fetch_product(url, platform="aliexpress")`.
 
 ## Quick start
 

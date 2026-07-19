@@ -66,6 +66,25 @@ Gemma 4 31B at BF16 also fits (~62 GB) if HF hosts it.
 | Llama 3.1 70B Q4_K_M | ~40 GB | — | Sub-second |
 | Llama 3.1 70B BF16 | ~140 GB | — | 1-2s |
 
+## Amazon scraper — submodule runtime deps
+
+The `vendor/ecommerce-scraper` submodule ships its own pinned `playwright`
+in `vendor/ecommerce-scraper/requirements.txt`. When `ECommerceAdapter`
+invokes the Amazon scraper (i.e. during the demo's live-lookup phase),
+the active Python environment needs Playwright + Chromium installed:
+
+```bash
+uv pip install playwright
+python -m playwright install chromium
+```
+
+The submodule's `Amazon.scrape()` opens Chromium, navigates to the
+product URL, and extracts name / price / description / images. It
+expects a persistent Chrome profile at `$CHROME_PROFILE_PATH`
+(default `~/.mozilla/edge_profile`) — for the live demo, populate
+that directory with a logged-in Amazon session so captcha walls
+don't block extraction.
+
 ## Bring-up (verified steps — AMD 1-Click image)
 
 The image ships vLLM 0.23.0 **running inside a Docker container**, with

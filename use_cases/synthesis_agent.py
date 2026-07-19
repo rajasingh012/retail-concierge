@@ -1,14 +1,13 @@
 """Synthesis agent — runs the structured brief against live tools.
 
-Provider-agnostic: takes any ChatModelClient implementation.
+Provider-agnostic: takes any `OpenAIChatClient` from `agent_framework.openai`.
 """
 from __future__ import annotations
 
 from typing import Any, List
 
-from agent_framework import ChatAgent
-
-from infrastructure.chat_clients import ChatModelClient
+from agent_framework import Agent
+from agent_framework.openai import OpenAIChatClient
 
 
 SYNTHESIS_INSTRUCTIONS = """\
@@ -19,7 +18,7 @@ using the tools available.
 Workflow:
 1. Call search_catalog once with the most discriminating tokens
    (brand + must-have feature) to find local candidates.
-2. For the top 1-3 candidates, optionally call fetch_product_page
+2. For the top 1-3 candidates, optionally call fetch_product_from_site
    on a live URL to verify price/availability.
 3. Rank by how well each product matches `must_have`, then by price.
 4. Return a final answer as JSON with:
@@ -32,12 +31,11 @@ Never invent product data — only use what the tools returned.
 
 
 def build_synthesis_agent(
-    client: ChatModelClient,
+    client: OpenAIChatClient,
     tools: List[Any],
-) -> ChatAgent:
-    return ChatAgent(
-        chat_client=client,
-        model=getattr(client, "model", ""),
+) -> Agent:
+    return Agent(
+        client=client,
         instructions=SYNTHESIS_INSTRUCTIONS,
         tools=tools,
     )

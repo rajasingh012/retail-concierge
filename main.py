@@ -20,7 +20,6 @@ from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ProductCatalogRepository
 from infrastructure.ecommerce_adapter import ECommerceAdapter
 from infrastructure.indexer import LocalHybridSearchEngine
-from infrastructure.scraper import PlaywrightScraper
 from use_cases import build_discovery_agent, build_synthesis_agent
 
 DEFAULT_PROVIDER = "vllm"      # cloud MI300X default; use "deepseek" for local dev
@@ -65,10 +64,8 @@ async def run_chat() -> None:
     # ---------- infrastructure ----------
     repo = ProductCatalogRepository(DEFAULT_DB)
     search_engine = LocalHybridSearchEngine(repo)
-    scraper = PlaywrightScraper()
-    await scraper.start()
     ecommerce = ECommerceAdapter()
-    tools = build_tools(search_engine, scraper=scraper, ecommerce_adapter=ecommerce)
+    tools = build_tools(search_engine, ecommerce_adapter=ecommerce)
 
     # ---------- model client (provider-agnostic) ----------
     client = resolve_client()
@@ -99,7 +96,6 @@ async def run_chat() -> None:
         await _run_streaming(synthesis, synthesis_prompt, "synthesis")
 
     # ---------- teardown ----------
-    await scraper.close()
     repo.close()
 
 

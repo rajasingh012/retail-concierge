@@ -115,11 +115,14 @@ def _to_product_payload(
     """
     title = raw.get("name", "Unknown Product")
 
-    # Price as a single variant
+    # Price as a single variant — handle "N/A" strings from failed extraction
     price_str = raw.get("current_price", "0")
-    price_int = int(raw.get("current_price_integer", 0))
-    price_dec = int(raw.get("current_price_decimal", 0))
-    price = float(f"{price_int}.{price_dec:02d}")
+    try:
+        price_int = int(raw.get("current_price_integer", 0))
+        price_dec = int(raw.get("current_price_decimal", 0))
+        price = float(f"{price_int}.{price_dec:02d}")
+    except (ValueError, TypeError):
+        price = 0.0
 
     variant = ItemVariant(
         sku=f"{platform}-{hash(url)}",

@@ -14,7 +14,6 @@ dependencies = [
     "agent-framework>=1.0.0",
     "openai>=1.40.0",
     "rank-bm25>=0.2.2",
-    "playwright>=1.45.0",
     "cachetools>=5.3.0",
     "beautifulsoup4>=4.14.0",
     "lxml>=5.3.0",
@@ -38,3 +37,8 @@ packages = ["domain", "use_cases", "infrastructure"]
 # - Local devs without ROCm use DeepSeek via the OpenAI SDK (already covered).
 # - The Dockerfile in this repo installs PyTorch ROCm separately as a
 #   fallback for non-1-Click environments.
+#
+# Note: playwright is NOT a project dependency either. The submodule at
+# vendor/ecommerce-scraper ships its own pinned playwright version, and
+# we use the submodule exclusively for live product scraping. The local
+# SQLite catalog is the only thing our agent's search_catalog tool needs.
