@@ -70,3 +70,4 @@ DEEPSEEK_API_KEY=*** \
 - Product prices, ratings, review counts, and popularity are dataset snapshots.
 - The application does not claim live availability, current pricing, shipping, or specifications absent from product titles.
 - Only vLLM inference requires network access during the judge demo.
+- Every catalog query and every final recommendation is shown to the user for approval before it runs or ships. The benchmark uses an auto-approving middleware so the headless run does not stall.

@@ -1,8 +1,8 @@
 # RetailConcierge
 
-Collaborative retail recommendation agents built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. Discovery clarifies the request, Catalog Research gathers evidence from an offline Amazon dataset, and a Critic independently checks and ranks the recommendations.
+Three collaborating agents built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. The user is in the loop: every catalog query the agents want to make is shown to the user for approval, edit, or redirect before it runs.
 
-The application uses dataset snapshots, not live Amazon data. It does not claim current prices, availability, shipping, or product specifications absent from the catalog.
+The catalog is an offline snapshot of the Amazon product dataset. The system never claims current prices, availability, shipping, or product specifications absent from the catalog.
 
 ## Quick start
 
@@ -29,6 +29,6 @@ DEEPSEEK_API_KEY=*** uv run python main.py
 
 ## Documentation
 
-- [architecture.md](architecture.md) — agents, tools, storage, and data flow
+- [architecture.md](architecture.md) — agents, tools, approval gate, storage, and data flow
 - [deploy.md](deploy.md) — catalog import and AMD MI300X deployment
 - [progress.md](progress.md) — forward-looking work only
