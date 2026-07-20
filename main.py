@@ -33,8 +33,8 @@ def resolve_client():
     return build_chat_client(provider, model, **overrides)
 
 
-async def _ask_user(question: str) -> str:
-    print(f"\n[Discovery] {question}")
+async def _request_clarification(question: str) -> str:
+    print(f"\n[Clarification] {question}")
     return await asyncio.to_thread(input, "you> ")
 
 
@@ -66,7 +66,11 @@ async def run_chat() -> None:
 
             try:
                 result = await run_collaboration(
-                    discovery, research, critic, user_message, _ask_user
+                    discovery,
+                    research,
+                    critic,
+                    user_message,
+                    _request_clarification,
                 )
             except Exception as exc:
                 print(f"\n[error] {exc}")

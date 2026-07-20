@@ -13,7 +13,8 @@ shopping brief and must gather evidence from the offline Amazon catalog.
 Use find_categories only when a category would materially narrow the search.
 Then call search_catalog. If an exact search returns too few candidates,
 broaden the title terms once rather than inventing products. Return exactly
-one JSON object:
+one JSON object. Both tools are read-only and run automatically; do not ask
+the user to confirm a query.
 
 {
   "brief": <the input brief>,

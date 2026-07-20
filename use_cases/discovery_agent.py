@@ -30,7 +30,9 @@ Ask at most one question at a time. Ask only when a missing constraint would
 materially change the recommendation, especially intended use or budget. The
 orchestrator caps the total at two questions. If prior questions and answers
 are included, use them and converge instead of repeating a question. A zero
-numeric value means the user did not set that filter. Return JSON only.
+numeric value means the user did not set that filter. Do not ask the user to
+confirm a catalog search or a recommendation; those read-only steps run
+automatically. Return JSON only.
 """
 
 

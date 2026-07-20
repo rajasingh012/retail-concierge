@@ -17,21 +17,22 @@ main.py          composition root and interactive orchestration
 
 | Agent | Responsibility | Tools |
 |---|---|---|
-| Discovery | Build a structured brief from the user's request | `commit_brief` (approval-mode) |
-| Catalog Research | Query only the offline catalog and label evidence gaps | `find_categories`, `search_catalog` (both approval-mode) |
-| Critic | Reject unsupported matches and rank evidence against the brief | `submit_recommendation` (approval-mode) |
+| Discovery | Build a structured brief and ask only decision-impacting clarification questions | None |
+| Catalog Research | Query only the offline catalog and label evidence gaps | `find_categories`, `search_catalog` |
+| Critic | Reject unsupported matches and rank evidence against the brief | None |
 
-Each agent is one MAF `Agent`. Reasoning and tool use are interleaved inside the same agent; the framework handles session resume, message history, and stream buffering.
+Each agent is one MAF `Agent`. The Catalog Research agent uses schema-aware MAF tools; the framework validates each tool call, executes the read-only Python function, and returns its JSON evidence to the model.
 
-## Human-in-the-loop
+## Clarification loop
 
-The user is the gate. Every tool that selects evidence or commits a final answer runs through `ApprovalMiddleware`:
+The user enters the loop only when a missing preference would materially change the recommendation:
 
-- `search_catalog` and `find_categories` pause so the user can approve, edit, or redirect the proposed query before it executes.
-- `commit_brief` and `submit_recommendation` pause so the user can approve, edit, or reject the agent's structured output before it becomes the basis for the next stage.
-- `find_categories` is auto-approved when the result is non-empty; the user only sees the gate when the agent needs to commit a category it could not verify.
+- Discovery asks one specific question at a time, prioritizing intended use, hard constraints, and budget.
+- The orchestration layer allows at most two clarification questions and then requires the best supported brief.
+- Explicit constraints are never silently relaxed. Conflicts are presented as choices, not generic confirmation prompts.
+- Catalog searches and final ranking run automatically because they are read-only and cannot place orders or modify user data.
 
-The CLI reads one line per approval. The benchmark passes an `AutoApproveMiddleware` that replies to every approval with the original call, so the bench stays headless and reproducible.
+The user can refine the recommendation in a later conversational turn. Catalog tools and recommendations are not user-confirmation checkpoints because the application does not add items to a cart or make purchases.
 
 ## Catalog
 
@@ -53,19 +54,20 @@ FTS5 searches product titles. SQL applies exact category, price, rating, bestsel
 user request
     |
     v
-Discovery Agent -- commit_brief (gated) --> structured brief
+Discovery Agent -- material ambiguity? --> user clarification (maximum two)
     |
     v
-Catalog Research Agent -- find_categories, search_catalog (each gated)
-    |                                       SQLite FTS5 + indexed filters
-    v                                       (1.4M+ product dataset)
+structured brief
+    |
+    v
+Catalog Research Agent -- find_categories, search_catalog
+    |                                   SQLite FTS5 + indexed filters
+    v                                   (1.4M+ product dataset)
 research evidence + explicit evidence gaps
     |
     v
-Critic Agent -- submit_recommendation (gated) --> ranked recommendation
+Critic Agent --> ranked recommendation
 ```
-
-Every arrow that crosses an agent boundary is a tool call. Every tool call is a user checkpoint.
 
 The system never claims live availability or current pricing. Prices, ratings, review counts, bestseller flags, and popularity are dataset snapshots.
 
@@ -74,7 +76,7 @@ The system never claims live availability or current pricing. Prices, ratings, r
 `bench/run_agent_bench.py` runs five full collaborations and records:
 
 - end-to-end latency per scenario
-- approval count (gates hit per scenario)
+- clarification count per scenario
 - catalog-tool cache hits and misses
 - candidate and recommendation counts
 - AMD GPU snapshots when available

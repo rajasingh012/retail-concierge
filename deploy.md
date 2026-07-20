@@ -69,5 +69,6 @@ DEEPSEEK_API_KEY=*** \
 - The catalog is offline and deterministic.
 - Product prices, ratings, review counts, and popularity are dataset snapshots.
 - The application does not claim live availability, current pricing, shipping, or specifications absent from product titles.
+- The application does not add items to a cart or make purchases.
 - Only vLLM inference requires network access during the judge demo.
-- Every catalog query and every final recommendation is shown to the user for approval before it runs or ships. The benchmark uses an auto-approving middleware so the headless run does not stall.
+- Discovery asks the user only when a missing preference or conflicting constraint would materially affect the recommendation. Read-only catalog tools and ranking run automatically.

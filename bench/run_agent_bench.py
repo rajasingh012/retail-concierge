@@ -32,7 +32,7 @@ SAMPLE_SCENARIOS = [
 ]
 
 
-async def _bench_answer(_: str) -> str:
+async def _bench_clarification_answer(_: str) -> str:
     return "Use reasonable defaults and continue with the available constraints."
 
 
@@ -85,7 +85,7 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             before = cache_stats()
             started = time.perf_counter()
             result = await run_collaboration(
-                discovery, research, critic, scenario, _bench_answer
+                discovery, research, critic, scenario, _bench_clarification_answer
             )
             elapsed = time.perf_counter() - started
             after = cache_stats()
@@ -93,7 +93,7 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 "scenario": index,
                 "request": scenario,
                 "latency_sec": round(elapsed, 3),
-                "questions_asked": result.questions_asked,
+                "clarifications_requested": result.clarifications_requested,
                 "candidates_researched": len(result.research.get("candidates", [])),
                 "recommendations": len(result.recommendation.get("ranked", [])),
                 "cache_hits_delta": after["hits"] - before["hits"],

@@ -138,10 +138,51 @@ def test_three_agent_handoffs_and_clarification() -> None:
             run_agent=fake_run,
         )
     )
-    assert result.questions_asked == 1
+    assert result.clarifications_requested == 1
     assert result.brief["budget_max"] == 200
     assert result.research["candidates"][0]["asin"] == "CHAIR1"
     assert result.recommendation["ranked"][0]["asin"] == "CHAIR1"
+
+
+def test_complete_brief_skips_clarification() -> None:
+    responses = {
+        "discovery": iter([
+            '{"complete": true, "brief": {"intent": "headphones", '
+            '"search_terms": "noise cancelling headphones", '
+            '"category_hint": "headphones", "budget_max": 250, '
+            '"minimum_stars": 4, "bestseller_only": false, '
+            '"must_have": ["noise cancelling"], "nice_to_have": [], '
+            '"target_use": "commuting"}}'
+        ]),
+        "research": iter([
+            '{"brief": {}, "searches": ["noise cancelling headphones"], '
+            '"candidates": [], "dataset_notice": "snapshot"}'
+        ]),
+        "critic": iter([
+            '{"ranked": [], "critic_notes": ["no matches"], '
+            '"recommendation": "Refine the request", '
+            '"dataset_notice": "snapshot"}'
+        ]),
+    }
+
+    async def fake_run(agent: object, prompt: str) -> str:
+        return next(responses[str(agent)])
+
+    async def unexpected_clarification(_: str) -> str:
+        raise AssertionError("a complete request must not interrupt the user")
+
+    result = asyncio.run(
+        run_collaboration(
+            "discovery",
+            "research",
+            "critic",
+            "Noise-cancelling headphones under $250 for commuting",
+            unexpected_clarification,
+            run_agent=fake_run,
+        )
+    )
+    assert result.clarifications_requested == 0
+    assert result.brief["budget_max"] == 250
 
 
 def test_parse_json_object_accepts_fence_and_rejects_array() -> None:

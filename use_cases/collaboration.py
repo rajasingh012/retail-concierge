@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-MAX_DISCOVERY_QUESTIONS = 2
+MAX_CLARIFICATIONS = 2
 
 
 @dataclass(frozen=True)
@@ -13,7 +13,7 @@ class CollaborationResult:
     brief: dict
     research: dict
     recommendation: dict
-    questions_asked: int
+    clarifications_requested: int
 
 
 async def run_agent_text(agent, prompt: str) -> str:
@@ -48,7 +48,7 @@ def discovery_prompt(initial_request: str, answers: list[tuple[str, str]]) -> st
             {"question": question, "answer": answer}
             for question, answer in answers
         ],
-        "remaining_question_budget": MAX_DISCOVERY_QUESTIONS - len(answers),
+        "remaining_clarification_budget": MAX_CLARIFICATIONS - len(answers),
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -56,11 +56,11 @@ def discovery_prompt(initial_request: str, answers: list[tuple[str, str]]) -> st
 async def discover_brief(
     discovery_agent,
     initial_request: str,
-    ask_user: Callable[[str], Awaitable[str]],
+    request_clarification: Callable[[str], Awaitable[str]],
     *,
     run_agent: Callable[[object, str], Awaitable[str]] = run_agent_text,
 ) -> tuple[dict, int]:
-    """Let the model decide whether to ask up to two clarification questions."""
+    """Let the model request up to two decision-impacting clarifications."""
     answers: list[tuple[str, str]] = []
     while True:
         raw = await run_agent(
@@ -72,7 +72,7 @@ async def discover_brief(
             if not isinstance(brief, dict):
                 raise ValueError("Discovery response is complete but has no brief object")
             return brief, len(answers)
-        if len(answers) >= MAX_DISCOVERY_QUESTIONS:
+        if len(answers) >= MAX_CLARIFICATIONS:
             force_prompt = discovery_prompt(initial_request, answers)
             force_prompt += (
                 "\nQuestion budget is exhausted. Return complete=true with the best "
@@ -87,7 +87,7 @@ async def discover_brief(
         question = result.get("question")
         if not isinstance(question, str) or not question.strip():
             raise ValueError("Discovery agent requested clarification without a question")
-        answer = await ask_user(question.strip())
+        answer = await request_clarification(question.strip())
         answers.append((question.strip(), answer.strip()))
 
 
@@ -96,13 +96,16 @@ async def run_collaboration(
     research_agent,
     critic_agent,
     initial_request: str,
-    ask_user: Callable[[str], Awaitable[str]],
+    request_clarification: Callable[[str], Awaitable[str]],
     *,
     run_agent: Callable[[object, str], Awaitable[str]] = run_agent_text,
 ) -> CollaborationResult:
-    """Execute the three-agent collaboration with explicit JSON handoffs."""
+    """Execute the three-agent collaboration with clarification-only HITL."""
     brief, question_count = await discover_brief(
-        discovery_agent, initial_request, ask_user, run_agent=run_agent
+        discovery_agent,
+        initial_request,
+        request_clarification,
+        run_agent=run_agent,
     )
     research_raw = await run_agent(
         research_agent,
@@ -120,5 +123,5 @@ async def run_collaboration(
         brief=brief,
         research=research,
         recommendation=recommendation,
-        questions_asked=question_count,
+        clarifications_requested=question_count,
     )
