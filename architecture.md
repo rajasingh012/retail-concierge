@@ -3,22 +3,22 @@
 ## Layers
 
 ```text
-domain/          catalog evidence contracts
+domain/          (empty — agents use plain dicts from catalog)
 use_cases/       Discovery, Catalog Research, and Critic agents
 infrastructure/  SQLite catalog, FTS5 search, MAF tools, chat client factory
-scripts/         dataset importer, vLLM launcher, droplet firewall
+scripts/         ABO NDJSON importer, vLLM launcher, droplet firewall
 bench/           collaboration benchmark and AMD metrics
 main.py          composition root and interactive orchestration
 ```
 
-`domain/` has no framework or infrastructure imports. Agents receive Microsoft Agent Framework's `OpenAIChatClient`; vLLM and DeepSeek use the same OpenAI-compatible client.
+Agents receive Microsoft Agent Framework's `OpenAIChatCompletionClient`; vLLM and DeepSeek use the same OpenAI Chat Completions wire protocol.
 
 ## Agent collaboration
 
 | Agent | Responsibility | Tools |
 |---|---|---|
 | Discovery | Build a structured brief, record assumptions, and ask only blocking clarification questions | None |
-| Catalog Research | Retrieve candidates, classify product identity, and label evidence gaps | `find_categories`, `search_catalog` |
+| Catalog Research | Retrieve candidates, classify product identity, and label evidence gaps | `find_product_types`, `search_catalog` |
 | Critic | Enforce the brief, preserve eligible-product order, and propose contextual refinement chips | None |
 
 Each agent is one MAF `Agent`. The Catalog Research agent uses schema-aware MAF tools; the framework validates each tool call, executes the read-only Python function, and returns its JSON evidence to the model.
@@ -37,19 +37,20 @@ The Critic returns up to four contextual refinement chips derived from assumptio
 
 ## Catalog
 
-The external CSV dataset is imported once into `retail_catalog.db`. Neither the source CSV nor generated database is committed.
+The Amazon Berkeley Objects (ABO) NDJSON dataset is imported once into `retail_catalog.db`. The raw shards stay outside Git.
 
 SQLite stores facts once:
 
 ```text
-categories(id INTEGER PK, name UNIQUE)
-products(id INTEGER PK, asin UNIQUE, ..., category_id FK -> categories.id)
-product_fts(title, external content -> products.id)
+listings(item_id TEXT PK, title_en TEXT, brand_en TEXT, product_type TEXT, ...)
+listing_text_values(item_id FK, type, value)   — color, material, style, etc.
+listing_dimensions(item_id FK, dimension, value, unit)  — height/width/length/weight in cm/g
+listings_fts(title, brand, content -> listings)
 ```
 
-FTS5 searches product titles and returns up to 50 candidates in BM25 order. SQL applies exact category, price, rating, and bestseller filters first. Research then classifies each title as `exact_product`, `accessory`, `unrelated`, or `uncertain`; only exact products remain eligible.
+FTS5 searches title + brand and returns up to 50 candidates in BM25 order. SQL applies optional product-type and dimension filters first. The Research agent then classifies each listing as `exact_product`, `accessory`, `unrelated`, or `uncertain`; only exact products remain eligible.
 
-Eligible candidates are ordered deterministically by 55% retrieval relevance, 25% log-scaled `bought_last_month`, 15% rating confidence from stars and review count, and 5% bestseller status. Log scaling prevents a single high-volume item from dominating. Product identity is an eligibility rule, so a popular accessory can never outrank the requested product. SQLite and FTS5 remain the only search infrastructure.
+Eligible candidates are ordered deterministically by 55% FTS5 relevance + 25% bullet-coverage score + 15% material/brand presence + 5% dimension availability. No pricing, ratings, or popularity signals exist in the catalog.
 
 ## Data flow
 
@@ -63,9 +64,9 @@ Discovery Agent -- blocking ambiguity? --> user clarification (maximum two)
 structured brief
     |
     v
-Catalog Research Agent -- find_categories, search_catalog (top 50)
-    |                                    SQLite FTS5 + indexed filters
-    v                                    (1.4M+ product dataset)
+Catalog Research Agent -- find_product_types, search_catalog (top 50)
+    |                                    SQLite FTS5 + product-type/dimension filters
+    v                                    (145K listings, 576 product types)
 LLM product-type screening -- keep exact products only
     |
     v
@@ -77,7 +78,7 @@ Critic Agent --> ranked recommendation + refinement chips
     |-------- selected refinement ---------|
 ```
 
-The system never claims live availability or current pricing. Prices, ratings, review counts, bestseller flags, and popularity are dataset snapshots.
+The system never claims live availability or current pricing. The catalog contains no prices, ratings, review counts, or popularity data.
 
 ## Benchmark
 
