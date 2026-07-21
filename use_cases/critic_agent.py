@@ -23,13 +23,24 @@ Return exactly one JSON object:
   ],
   "critic_notes": ["checks, rejected evidence, or coverage limitations"],
   "recommendation": "one concise action",
+  "refinement_chips": [
+    {
+      "label": "short user-facing option",
+      "instruction": "self-contained change to apply to the original request"
+    }
+  ],
   "dataset_notice": "Prices, ratings, and popularity are dataset snapshots, not live data."
 }
 
-Return at most 5 ranked products. Do not invent features, availability,
-shipping, warranties, or current prices. An item with missing proof for a
-must-have cannot be called a confirmed match; disclose the gap or omit it.
-Return JSON only.
+Return at most 5 ranked products and 4 refinement chips. Each chip must address
+a real ambiguity, assumption, evidence gap, or useful trade-off in this result.
+Examples are "Prefer earbuds", "Prioritize battery life", or "Lower budget to
+$150". Do not emit generic chips such as "Show more" or invent refinements
+unrelated to the brief and evidence. The instruction must be sufficient to
+rerun the entire collaboration when appended to the original user request.
+Do not invent features, availability, shipping, warranties, or current prices.
+An item with missing proof for a must-have cannot be called a confirmed match;
+disclose the gap or omit it. Return JSON only.
 """
 
 

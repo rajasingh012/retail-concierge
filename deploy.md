@@ -71,4 +71,4 @@ DEEPSEEK_API_KEY=*** \
 - The application does not claim live availability, current pricing, shipping, or specifications absent from product titles.
 - The application does not add items to a cart or make purchases.
 - Only vLLM inference requires network access during the judge demo.
-- Discovery asks the user only when a missing preference or conflicting constraint would materially affect the recommendation. Read-only catalog tools and ranking run automatically.
+- Discovery asks only when ambiguity blocks a valid search; otherwise it shows products with explicit assumptions and contextual refinement chips. Selecting a chip reruns the read-only recommendation flow.

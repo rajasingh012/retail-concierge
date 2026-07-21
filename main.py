@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
 
@@ -14,7 +13,7 @@ from use_cases import (
     build_discovery_agent,
     build_research_agent,
 )
-from use_cases.collaboration import run_collaboration
+from use_cases.collaboration import RefinementChip, apply_refinement, run_collaboration
 
 DEFAULT_PROVIDER = "vllm"
 DEFAULT_MODEL = "google/gemma-3-27b-it"
@@ -36,6 +35,81 @@ def resolve_client():
 async def _request_clarification(question: str) -> str:
     print(f"\n[Clarification] {question}")
     return await asyncio.to_thread(input, "you> ")
+
+
+def _format_product(product: dict) -> str:
+    """Render one evidence-backed recommendation for the terminal."""
+    rank = product.get("rank", "-")
+    title = product.get("title", "Untitled product")
+    price = product.get("dataset_price", 0)
+    stars = product.get("dataset_stars", 0)
+    price_text = f"${price:.2f}" if isinstance(price, (int, float)) else str(price)
+    lines = [
+        f"{rank}. {title}",
+        f"   Dataset price: {price_text} | Stars: {stars}",
+    ]
+    for reason in product.get("why_it_fits", []):
+        lines.append(f"   + {reason}")
+    for trade_off in product.get("trade_offs", []):
+        lines.append(f"   - {trade_off}")
+    if url := product.get("product_url"):
+        lines.append(f"   {url}")
+    return "\n".join(lines)
+
+
+def _show_result(result) -> None:
+    """Show products first, followed by assumptions and refinement chips."""
+    recommendation = result.recommendation
+    ranked = recommendation.get("ranked", [])
+    print("\nRecommendations")
+    if ranked:
+        print("\n\n".join(_format_product(product) for product in ranked))
+    else:
+        print("No supported catalog matches were found.")
+
+    if summary := recommendation.get("recommendation"):
+        print(f"\n{summary}")
+    assumptions = result.brief.get("assumptions", [])
+    if assumptions:
+        print("\nAssumptions:")
+        for assumption in assumptions:
+            print(f"- {assumption}")
+    notes = recommendation.get("critic_notes", [])
+    if notes:
+        print("\nEvidence notes:")
+        for note in notes:
+            print(f"- {note}")
+    if notice := recommendation.get("dataset_notice"):
+        print(f"\n{notice}")
+    if result.refinement_chips:
+        print("\nRefine:")
+        print(" ".join(
+            f"[{index}] {chip.label}"
+            for index, chip in enumerate(result.refinement_chips, start=1)
+        ))
+
+
+async def _next_refinement(
+    current_request: str, chips: tuple[RefinementChip, ...]
+) -> str | None:
+    """Translate a numbered chip or free text into the next shopping request."""
+    if not chips:
+        return None
+    reply = (
+        await asyncio.to_thread(
+            input, "refine> Choose a number, type your own refinement, or Enter: "
+        )
+    ).strip()
+    if not reply:
+        return None
+    if reply.isdigit():
+        index = int(reply) - 1
+        if 0 <= index < len(chips):
+            return apply_refinement(current_request, chips[index])
+        print(f"Choose a number from 1 to {len(chips)}.")
+        return None
+    custom = RefinementChip(label=reply, instruction=reply)
+    return apply_refinement(current_request, custom)
 
 
 async def run_chat() -> None:
@@ -64,24 +138,23 @@ async def run_chat() -> None:
             if not user_message or user_message.lower() in {"quit", "exit"}:
                 break
 
-            try:
-                result = await run_collaboration(
-                    discovery,
-                    research,
-                    critic,
-                    user_message,
-                    _request_clarification,
+            current_request = user_message
+            while current_request:
+                try:
+                    result = await run_collaboration(
+                        discovery,
+                        research,
+                        critic,
+                        current_request,
+                        _request_clarification,
+                    )
+                except Exception as exc:
+                    print(f"\n[error] {exc}")
+                    break
+                _show_result(result)
+                current_request = await _next_refinement(
+                    current_request, result.refinement_chips
                 )
-            except Exception as exc:
-                print(f"\n[error] {exc}")
-                continue
-
-            print("\n[Discovery brief]")
-            print(json.dumps(result.brief, indent=2, ensure_ascii=False))
-            print("\n[Research evidence]")
-            print(json.dumps(result.research, indent=2, ensure_ascii=False))
-            print("\n[Critic recommendation]")
-            print(json.dumps(result.recommendation, indent=2, ensure_ascii=False))
     finally:
         repository.close()
 

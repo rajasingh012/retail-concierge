@@ -8,8 +8,15 @@ from pathlib import Path
 
 from infrastructure.agent_tools import build_tools, cache_stats, clear_cache
 from infrastructure.database import ProductCatalogRepository
+from main import _format_product
 from scripts.import_catalog import import_catalog
-from use_cases.collaboration import parse_json_object, run_collaboration
+from use_cases.collaboration import (
+    RefinementChip,
+    apply_refinement,
+    parse_json_object,
+    parse_refinement_chips,
+    run_collaboration,
+)
 
 
 def _write_dataset(root: Path) -> tuple[Path, Path]:
@@ -106,22 +113,26 @@ def test_tool_cache_tracks_hits(tmp_path: Path) -> None:
     repository.close()
 
 
-def test_three_agent_handoffs_and_clarification() -> None:
+def test_blocking_ambiguity_requests_clarification() -> None:
     responses = {
         "discovery": iter([
-            '{"complete": false, "question": "What is your budget?"}',
-            '{"complete": true, "brief": {"intent": "office chair", '
-            '"search_terms": "ergonomic mesh chair", "category_hint": "office chair", '
-            '"budget_max": 200, "minimum_stars": 4, "bestseller_only": false, '
-            '"must_have": ["mesh"], "nice_to_have": [], "target_use": "office"}}',
+            '{"complete": false, "question": "Which laptop model do you use?"}',
+            '{"complete": true, "brief": {"intent": "laptop charger", '
+            '"search_terms": "ThinkPad USB-C charger", "category_hint": "charger", '
+            '"budget_max": 0, "minimum_stars": 0, "bestseller_only": false, '
+            '"must_have": ["ThinkPad compatible"], "nice_to_have": [], '
+            '"target_use": "ThinkPad T14", "assumptions": []}}',
         ]),
         "research": iter([
-            '{"brief": {}, "searches": ["mesh chair"], "candidates": '
-            '[{"asin": "CHAIR1"}], "dataset_notice": "snapshot"}'
+            '{"brief": {}, "searches": ["ThinkPad USB-C charger"], '
+            '"candidates": [{"asin": "CHARGER1"}], '
+            '"dataset_notice": "snapshot"}'
         ]),
         "critic": iter([
-            '{"ranked": [{"asin": "CHAIR1"}], "critic_notes": [], '
-            '"recommendation": "Choose CHAIR1", "dataset_notice": "snapshot"}'
+            '{"ranked": [{"asin": "CHARGER1"}], "critic_notes": [], '
+            '"recommendation": "Choose CHARGER1", "refinement_chips": '
+            '[{"label": "Prefer compact", "instruction": '
+            '"Prioritize a compact charger"}], "dataset_notice": "snapshot"}'
         ]),
     }
 
@@ -129,19 +140,22 @@ def test_three_agent_handoffs_and_clarification() -> None:
         return next(responses[str(agent)])
 
     async def answer(question: str) -> str:
-        assert question == "What is your budget?"
-        return "$200"
+        assert question == "Which laptop model do you use?"
+        return "ThinkPad T14"
 
     result = asyncio.run(
         run_collaboration(
-            "discovery", "research", "critic", "I need a chair", answer,
+            "discovery", "research", "critic", "I need a laptop charger", answer,
             run_agent=fake_run,
         )
     )
     assert result.clarifications_requested == 1
-    assert result.brief["budget_max"] == 200
-    assert result.research["candidates"][0]["asin"] == "CHAIR1"
-    assert result.recommendation["ranked"][0]["asin"] == "CHAIR1"
+    assert result.brief["target_use"] == "ThinkPad T14"
+    assert result.research["candidates"][0]["asin"] == "CHARGER1"
+    assert result.recommendation["ranked"][0]["asin"] == "CHARGER1"
+    assert result.refinement_chips == (
+        RefinementChip("Prefer compact", "Prioritize a compact charger"),
+    )
 
 
 def test_complete_brief_skips_clarification() -> None:
@@ -152,7 +166,7 @@ def test_complete_brief_skips_clarification() -> None:
             '"category_hint": "headphones", "budget_max": 250, '
             '"minimum_stars": 4, "bestseller_only": false, '
             '"must_have": ["noise cancelling"], "nice_to_have": [], '
-            '"target_use": "commuting"}}'
+            '"target_use": "commuting", "assumptions": []}}'
         ]),
         "research": iter([
             '{"brief": {}, "searches": ["noise cancelling headphones"], '
@@ -183,6 +197,83 @@ def test_complete_brief_skips_clarification() -> None:
     )
     assert result.clarifications_requested == 0
     assert result.brief["budget_max"] == 250
+
+
+def test_nonblocking_ambiguity_proceeds_with_assumptions_and_refinements() -> None:
+    responses = {
+        "discovery": iter([
+            '{"complete": true, "brief": {"intent": "travel headphones", '
+            '"search_terms": "noise cancelling headphones", '
+            '"category_hint": "headphones", "budget_max": 0, '
+            '"minimum_stars": 0, "bestseller_only": false, '
+            '"must_have": [], "nice_to_have": ["travel friendly"], '
+            '"target_use": "travel", '
+            '"assumptions": ["Over-ear models are acceptable"]}}'
+        ]),
+        "research": iter([
+            '{"brief": {}, "searches": ["noise cancelling headphones"], '
+            '"candidates": [{"asin": "HP1"}], "dataset_notice": "snapshot"}'
+        ]),
+        "critic": iter([
+            '{"ranked": [{"asin": "HP1"}], "critic_notes": [], '
+            '"recommendation": "Compare the top match", "refinement_chips": '
+            '[{"label": "Prefer earbuds", "instruction": '
+            '"Recommend earbuds instead of over-ear headphones"}], '
+            '"dataset_notice": "snapshot"}'
+        ]),
+    }
+
+    async def fake_run(agent: object, prompt: str) -> str:
+        return next(responses[str(agent)])
+
+    async def unexpected_clarification(_: str) -> str:
+        raise AssertionError("non-blocking ambiguity must not interrupt the user")
+
+    result = asyncio.run(
+        run_collaboration(
+            "discovery",
+            "research",
+            "critic",
+            "I need headphones for travel",
+            unexpected_clarification,
+            run_agent=fake_run,
+        )
+    )
+    assert result.clarifications_requested == 0
+    assert result.brief["assumptions"] == ["Over-ear models are acceptable"]
+    refined = apply_refinement("I need headphones for travel", result.refinement_chips[0])
+    assert "Recommend earbuds instead" in refined
+
+
+def test_refinement_chips_are_deduplicated_and_capped() -> None:
+    recommendation = {
+        "refinement_chips": [
+            {"label": "A", "instruction": "Apply A"},
+            {"label": "A", "instruction": "Apply A"},
+            {"label": "B", "instruction": "Apply B"},
+            {"label": "C", "instruction": "Apply C"},
+            {"label": "D", "instruction": "Apply D"},
+            {"label": "E", "instruction": "Apply E"},
+        ]
+    }
+    chips = parse_refinement_chips(recommendation)
+    assert [chip.label for chip in chips] == ["A", "B", "C", "D"]
+
+
+def test_human_readable_product_output() -> None:
+    rendered = _format_product({
+        "rank": 1,
+        "title": "Travel Headphones",
+        "dataset_price": 199.99,
+        "dataset_stars": 4.6,
+        "why_it_fits": ["Within budget"],
+        "trade_offs": ["Comfort is not verified"],
+        "product_url": "https://example.com/HP1",
+    })
+    assert "1. Travel Headphones" in rendered
+    assert "Dataset price: $199.99" in rendered
+    assert "+ Within budget" in rendered
+    assert "- Comfort is not verified" in rendered
 
 
 def test_parse_json_object_accepts_fence_and_rejects_array() -> None:

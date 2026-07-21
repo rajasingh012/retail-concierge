@@ -1,6 +1,6 @@
 # RetailConcierge
 
-Three collaborating agents built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. The Discovery agent asks a clarification only when a missing preference would materially affect the recommendation; read-only catalog lookups then run automatically.
+Three collaborating agents built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. The default is to show evidence-backed products immediately with explicit assumptions and refinement chips. Discovery asks at most two questions only when ambiguity blocks a valid search.
 
 The catalog is an offline snapshot of the Amazon product dataset. The system never claims current prices, availability, shipping, or product specifications absent from the catalog, and it does not add items to a cart or make purchases.
 

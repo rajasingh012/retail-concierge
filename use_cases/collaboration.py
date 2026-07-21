@@ -9,11 +9,18 @@ MAX_CLARIFICATIONS = 2
 
 
 @dataclass(frozen=True)
+class RefinementChip:
+    label: str
+    instruction: str
+
+
+@dataclass(frozen=True)
 class CollaborationResult:
     brief: dict
     research: dict
     recommendation: dict
     clarifications_requested: int
+    refinement_chips: tuple[RefinementChip, ...]
 
 
 async def run_agent_text(agent, prompt: str) -> str:
@@ -39,6 +46,37 @@ def parse_json_object(text: str, stage: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{stage} agent must return a JSON object")
     return value
+
+
+def parse_refinement_chips(recommendation: dict) -> tuple[RefinementChip, ...]:
+    """Validate and cap user-facing refinements returned by the Critic."""
+    raw_chips = recommendation.get("refinement_chips", [])
+    if not isinstance(raw_chips, list):
+        raise ValueError("Critic refinement_chips must be an array")
+    chips: list[RefinementChip] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in raw_chips:
+        if not isinstance(raw, dict):
+            raise ValueError("Each refinement chip must be an object")
+        label = raw.get("label")
+        instruction = raw.get("instruction")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("Each refinement chip needs a label")
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise ValueError("Each refinement chip needs an instruction")
+        key = (label.strip(), instruction.strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        chips.append(RefinementChip(*key))
+        if len(chips) == 4:
+            break
+    return tuple(chips)
+
+
+def apply_refinement(initial_request: str, chip: RefinementChip) -> str:
+    """Build a self-contained request for a selected refinement."""
+    return f"{initial_request}\n\nUser-selected refinement: {chip.instruction}"
 
 
 def discovery_prompt(initial_request: str, answers: list[tuple[str, str]]) -> str:
@@ -119,9 +157,11 @@ async def run_collaboration(
         + json.dumps(critic_input, ensure_ascii=False),
     )
     recommendation = parse_json_object(recommendation_raw, "Critic")
+    refinement_chips = parse_refinement_chips(recommendation)
     return CollaborationResult(
         brief=brief,
         research=research,
         recommendation=recommendation,
         clarifications_requested=question_count,
+        refinement_chips=refinement_chips,
     )

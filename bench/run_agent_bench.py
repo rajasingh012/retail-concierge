@@ -94,6 +94,7 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 "request": scenario,
                 "latency_sec": round(elapsed, 3),
                 "clarifications_requested": result.clarifications_requested,
+                "refinement_chips": len(result.refinement_chips),
                 "candidates_researched": len(result.research.get("candidates", [])),
                 "recommendations": len(result.recommendation.get("ranked", [])),
                 "cache_hits_delta": after["hits"] - before["hits"],

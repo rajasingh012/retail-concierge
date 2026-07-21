@@ -17,22 +17,23 @@ main.py          composition root and interactive orchestration
 
 | Agent | Responsibility | Tools |
 |---|---|---|
-| Discovery | Build a structured brief and ask only decision-impacting clarification questions | None |
+| Discovery | Build a structured brief, record assumptions, and ask only blocking clarification questions | None |
 | Catalog Research | Query only the offline catalog and label evidence gaps | `find_categories`, `search_catalog` |
-| Critic | Reject unsupported matches and rank evidence against the brief | None |
+| Critic | Reject unsupported matches, rank evidence, and propose contextual refinement chips | None |
 
 Each agent is one MAF `Agent`. The Catalog Research agent uses schema-aware MAF tools; the framework validates each tool call, executes the read-only Python function, and returns its JSON evidence to the model.
 
-## Clarification loop
+## Interaction loop
 
-The user enters the loop only when a missing preference would materially change the recommendation:
+The default path shows products without interruption:
 
-- Discovery asks one specific question at a time, prioritizing intended use, hard constraints, and budget.
+- Discovery proceeds with reasonable, explicit assumptions for non-blocking ambiguity such as an unspecified brand, color, or budget.
+- It asks one specific question only when compatibility is unknown, interpretations imply different product types, explicit constraints conflict, or a must-have would otherwise be silently relaxed.
 - The orchestration layer allows at most two clarification questions and then requires the best supported brief.
 - Explicit constraints are never silently relaxed. Conflicts are presented as choices, not generic confirmation prompts.
 - Catalog searches and final ranking run automatically because they are read-only and cannot place orders or modify user data.
 
-The user can refine the recommendation in a later conversational turn. Catalog tools and recommendations are not user-confirmation checkpoints because the application does not add items to a cart or make purchases.
+The Critic returns up to four contextual refinement chips derived from assumptions, evidence gaps, or useful trade-offs. Selecting a chip appends its instruction to the current request and reruns Discovery → Research → Critic. Free-text refinement follows the same path.
 
 ## Catalog
 
@@ -54,7 +55,7 @@ FTS5 searches product titles. SQL applies exact category, price, rating, bestsel
 user request
     |
     v
-Discovery Agent -- material ambiguity? --> user clarification (maximum two)
+Discovery Agent -- blocking ambiguity? --> user clarification (maximum two)
     |
     v
 structured brief
@@ -66,7 +67,9 @@ Catalog Research Agent -- find_categories, search_catalog
 research evidence + explicit evidence gaps
     |
     v
-Critic Agent --> ranked recommendation
+Critic Agent --> ranked recommendation + refinement chips
+    ^                                      |
+    |-------- selected refinement ---------|
 ```
 
 The system never claims live availability or current pricing. Prices, ratings, review counts, bestseller flags, and popularity are dataset snapshots.
@@ -77,6 +80,7 @@ The system never claims live availability or current pricing. Prices, ratings, r
 
 - end-to-end latency per scenario
 - clarification count per scenario
+- refinement-chip count per scenario
 - catalog-tool cache hits and misses
 - candidate and recommendation counts
 - AMD GPU snapshots when available
