@@ -1,4 +1,4 @@
-"""Composition root for the offline three-agent retail collaboration."""
+"""Composition root for the offline three-agent retail collaboration (ABO catalog)."""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +7,7 @@ from pathlib import Path
 
 from infrastructure.agent_tools import build_tools
 from infrastructure.chat_clients import build_chat_client
-from infrastructure.database import ProductCatalogRepository
+from infrastructure.database import ABOCatalogRepository
 from use_cases import (
     build_critic_agent,
     build_discovery_agent,
@@ -40,14 +40,21 @@ async def _request_clarification(question: str) -> str:
 def _format_product(product: dict) -> str:
     """Render one evidence-backed recommendation for the terminal."""
     rank = product.get("rank", "-")
-    title = product.get("title", "Untitled product")
-    price = product.get("dataset_price", 0)
-    stars = product.get("dataset_stars", 0)
-    price_text = f"${price:.2f}" if isinstance(price, (int, float)) else str(price)
+    title = product.get("title_en", product.get("title", "Untitled product"))
+    brand = product.get("brand_en") or ""
+    material = product.get("material") or ""
+    color = product.get("color") or ""
+    has_dim = product.get("has_dimensions", 0)
+    dim_note = "| Dimensions recorded" if has_dim else ""
+    brand_text = f"| {brand}" if brand else ""
+    attr_text = f"Material: {material}" if material else ""
+    color_text = f"Color: {color}" if color else ""
+    meta = "  ".join(filter(None, [brand_text, attr_text, color_text, dim_note]))
     lines = [
         f"{rank}. {title}",
-        f"   Dataset price: {price_text} | Stars: {stars}",
     ]
+    if meta:
+        lines.append(f"   {meta}")
     for reason in product.get("why_it_fits", []):
         lines.append(f"   + {reason}")
     for trade_off in product.get("trade_offs", []):
@@ -96,7 +103,6 @@ def _show_result(result) -> None:
 async def _next_refinement(
     current_request: str, chips: tuple[RefinementChip, ...]
 ) -> str | None:
-    """Translate a numbered chip or free text into the next shopping request."""
     if not chips:
         return None
     reply = (
@@ -118,7 +124,7 @@ async def _next_refinement(
 
 async def run_chat() -> None:
     database = Path(os.getenv("RETAIL_DB", str(DEFAULT_DB)))
-    repository = ProductCatalogRepository(database)
+    repository = ABOCatalogRepository(database)
     client = resolve_client()
     tools = build_tools(repository)
     discovery = build_discovery_agent(client)
@@ -127,10 +133,10 @@ async def run_chat() -> None:
     stats = repository.stats()
 
     print(
-        f"[boot] {stats['products']:,} products / {stats['categories']} categories; "
+        f"[boot] {stats['listings']:,} products / {stats['product_types']:,} product types; "
         f"model={client.model}"
     )
-    print("RetailConcierge ready. Type 'quit' to exit.\n")
+    print("RetailConcierge ready (ABO catalog). Type 'quit' to exit.\n")
 
     try:
         while True:

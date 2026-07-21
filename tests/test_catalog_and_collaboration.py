@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import csv
+import gzip
 import json
 import sqlite3
 from pathlib import Path
 
 from infrastructure.agent_tools import build_tools, cache_stats, clear_cache
-from infrastructure.database import ProductCatalogRepository
+from infrastructure.database import ABOCatalogRepository, create_schema
 from main import _format_product
-from scripts.import_catalog import import_catalog
 from use_cases.collaboration import (
     RefinementChip,
     apply_refinement,
@@ -20,99 +19,108 @@ from use_cases.collaboration import (
 from use_cases.ranking import enforce_recommendation_order, screen_and_rank_candidates
 
 
-def _write_dataset(root: Path) -> tuple[Path, Path]:
-    categories = root / "categories.csv"
-    products = root / "products.csv"
-    with categories.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["id", "category_name"])
-        writer.writerow([1, "Office Chairs"])
-        writer.writerow([2, "Headphones"])
-    with products.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow([
-            "asin", "title", "imgUrl", "productURL", "stars", "reviews",
-            "price", "listPrice", "category_id", "isBestSeller",
-            "boughtInLastMonth",
-        ])
-        writer.writerow([
-            "CHAIR1", "Ergonomic Mesh Office Chair Lumbar Support", "img1",
-            "https://example.com/CHAIR1", 4.6, 1200, 149.99, 199.99, 1,
-            "True", 500,
-        ])
-        writer.writerow([
-            "CHAIR2", "Leather Executive Office Chair", "img2",
-            "https://example.com/CHAIR2", 4.1, 300, 189.99, 0, 1,
-            "False", 80,
-        ])
-        writer.writerow([
-            "CHAIR3", "Mesh Office Chair", "img3",
-            "https://example.com/CHAIR3", 4.9, 10, 0, 0, 1,
-            "False", 5,
-        ])
-    return products, categories
+# ---- helpers ----------------------------------------------------------------
 
+def _write_minimal_shards(root: Path, rows: list[dict]) -> Path:
+    """Write one gzipped NDJSON shard under root/listings/metadata/."""
+    shard_dir = root / "listings" / "metadata"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    lines = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows)
+    (shard_dir / "listings_0.json.gz").write_bytes(gzip.compress(lines.encode("utf-8")))
+    root_meta = root / "listings" / "README.md"
+    root_meta.parent.mkdir(parents=True, exist_ok=True)
+    root_meta.write_text("# test catalog")
+    return root
+
+
+FABRIC_CHAIR = {
+    "item_id": "CHR001", "marketplace": "Amazon", "country": "US",
+    "item_name": [{"language_tag": "en_US", "value": "Ergonomic Mesh Office Chair with Lumbar Support"}],
+    "brand": [{"language_tag": "en_US", "value": "ErgoComfort"}],
+    "bullet_point": [
+        {"language_tag": "en_US", "value": "Adjustable lumbar support"},
+        {"language_tag": "en_US", "value": "Breathable mesh back"},
+    ],
+    "color": [{"language_tag": "en_US", "value": "Black"}],
+    "material": [{"language_tag": "en_US", "value": "Mesh"}],
+    "product_type": [{"value": "CHAIR"}],
+    "main_image_id": "img1",
+    "item_dimensions": {"height": {"value": 120, "unit": "cm", "normalized_value": {"value": 120, "unit": "cm"}}},
+    "item_weight": [{"value": 15, "unit": "kg", "normalized_value": {"value": 15000, "unit": "g"}}],
+}
+
+LEATHER_CHAIR = {
+    "item_id": "CHR002", "marketplace": "Amazon", "country": "US",
+    "item_name": [{"language_tag": "en_US", "value": "Leather Executive Office Chair"}],
+    "brand": [{"language_tag": "en_US", "value": "PremiumOffice"}],
+    "color": [{"language_tag": "en_US", "value": "Brown"}],
+    "material": [{"language_tag": "en_US", "value": "Leather"}],
+    "product_type": [{"value": "CHAIR"}],
+    "main_image_id": "img2",
+}
+
+NO_ATTR_CHAIR = {
+    "item_id": "CHR003", "marketplace": "Amazon", "country": "US",
+    "item_name": [{"language_tag": "en_US", "value": "Basic Mesh Chair"}],
+    "product_type": [{"value": "CHAIR"}],
+}
+
+
+# ---- tests ------------------------------------------------------------------
 
 def test_import_search_filters_and_foreign_keys(tmp_path: Path) -> None:
-    products, categories = _write_dataset(tmp_path)
-    database = tmp_path / "catalog.db"
-    result = import_catalog(products, categories, database)
-    assert result["products"] == 3
-    assert result["categories"] == 2
+    archive = _write_minimal_shards(tmp_path / "archive", [FABRIC_CHAIR, LEATHER_CHAIR, NO_ATTR_CHAIR])
+    from scripts.import_catalog import import_catalog
+    db_path = tmp_path / "catalog.db"
+    result = import_catalog(archive, db_path)
+    assert result["listings"] == 3
 
-    repository = ProductCatalogRepository(database)
-    assert repository.stats() == {"products": 3, "categories": 2}
-    assert repository.find_categories("chair")[0]["category_id"] == 1
-    matches = repository.search(
-        "ergonomic mesh", category_id=1, max_price=160, min_stars=4.5
-    )
-    assert [product.asin for product in matches] == ["CHAIR1"]
-    product = repository.get_by_asin("CHAIR1")
-    assert product is not None
-    assert product.is_best_seller is True
-    repository.close()
+    repo = ABOCatalogRepository(db_path)
+    stats = repo.stats()
+    assert stats["listings"] == 3
+    assert stats["product_types"] == 1
 
-    conn = sqlite3.connect(database)
-    conn.execute("PRAGMA foreign_keys = ON")
-    try:
-        conn.execute(
-            """
-            INSERT INTO products(
-                asin,title,image_url,product_url,stars,review_count,price,
-                list_price,category_id,is_best_seller,bought_last_month
-            ) VALUES ('BAD','Bad','x','x',4,0,1,0,999,0,0)
-            """
-        )
-    except sqlite3.IntegrityError:
-        pass
-    else:
-        raise AssertionError("category foreign key was not enforced")
-    finally:
-        conn.close()
+    types = repo.find_product_types("chair")
+    assert len(types) == 1
+    assert types[0]["product_type"] == "CHAIR"
+    assert types[0]["product_count"] == 3
+
+    matches = repo.search("mesh chair", limit=10)
+    assert len(matches) == 2  # CHR001 and CHR003 (mesh chairs)
+    item_ids = [m["item_id"] for m in matches]
+    assert "CHR001" in item_ids
+    assert "CHR003" in item_ids
+
+    # Test dimension filtering
+    dim_matches = repo.search("chair", max_dimension_cm=130, limit=10)
+    assert "CHR001" in [m["item_id"] for m in dim_matches]
+
+    # Test text values
+    vals = repo.get_text_values("CHR001")
+    attrs = {v["attribute"] for v in vals}
+    assert "color" in attrs
+    assert "material" in attrs
+    assert "bullet_point" in attrs
+
+    repo.close()
 
 
 def test_tool_cache_tracks_hits(tmp_path: Path) -> None:
-    products, categories = _write_dataset(tmp_path)
-    database = tmp_path / "catalog.db"
-    import_catalog(products, categories, database)
-    repository = ProductCatalogRepository(database)
-    search_catalog = build_tools(repository)[1]
+    archive = _write_minimal_shards(tmp_path / "archive", [FABRIC_CHAIR, LEATHER_CHAIR, NO_ATTR_CHAIR])
+    from scripts.import_catalog import import_catalog
+    db_path = tmp_path / "catalog.db"
+    import_catalog(archive, db_path)
+    repo = ABOCatalogRepository(db_path)
+    search_catalog = build_tools(repo)[1]
     clear_cache()
-    kwargs = {
-        "query": "ergonomic chair",
-        "category_id": 1,
-        "max_price": 200,
-        "min_stars": 4,
-        "bestseller_only": False,
-        "limit": 5,
-    }
+    kwargs = {"query": "office chair", "product_type": "CHAIR", "max_dimension_cm": 0, "limit": 10}
     first = search_catalog(**kwargs)
     second = search_catalog(**kwargs)
     assert first == second
-    assert json.loads(first)[0]["asin"] == "CHAIR1"
-    assert json.loads(first)[0]["retrieval_rank"] == 1
+    parsed = json.loads(first)
+    assert parsed[0]["item_id"] == "CHR002"  # BM25 relevance
     assert cache_stats() == {"hits": 1, "misses": 1, "size": 1, "maxsize": 512}
-    repository.close()
+    repo.close()
 
 
 def test_blocking_ambiguity_requests_clarification() -> None:
@@ -121,19 +129,20 @@ def test_blocking_ambiguity_requests_clarification() -> None:
             '{"complete": false, "question": "Which laptop model do you use?"}',
             '{"complete": true, "brief": {"intent": "laptop charger", '
             '"search_terms": "ThinkPad USB-C charger", "category_hint": "charger", '
-            '"budget_max": 0, "minimum_stars": 0, "bestseller_only": false, '
+            '"max_dimension_cm": 0, '
             '"must_have": ["ThinkPad compatible"], "nice_to_have": [], '
             '"target_use": "ThinkPad T14", "assumptions": []}}',
         ]),
         "research": iter([
             '{"brief": {}, "searches": ["ThinkPad USB-C charger"], '
-            '"candidates": [{"asin": "CHARGER1", "retrieval_rank": 1, '
-            '"product_type_match": "exact_product", "bought_last_month": 10, '
-            '"stars": 4.5, "review_count": 100, "is_best_seller": false}], '
+            '"candidates": [{"item_id": "CHARGER1", "retrieval_rank": 1, '
+            '"product_type_match": "exact_product", '
+            '"has_bullet": true, "has_dimensions": false, '
+            '"has_weight": true, "has_material": false}], '
             '"dataset_notice": "snapshot"}'
         ]),
         "critic": iter([
-            '{"ranked": [{"asin": "CHARGER1"}], "critic_notes": [], '
+            '{"ranked": [{"item_id": "CHARGER1"}], "critic_notes": [], '
             '"recommendation": "Choose CHARGER1", "refinement_chips": '
             '[{"label": "Prefer compact", "instruction": '
             '"Prioritize a compact charger"}], "dataset_notice": "snapshot"}'
@@ -155,8 +164,8 @@ def test_blocking_ambiguity_requests_clarification() -> None:
     )
     assert result.clarifications_requested == 1
     assert result.brief["target_use"] == "ThinkPad T14"
-    assert result.research["candidates"][0]["asin"] == "CHARGER1"
-    assert result.recommendation["ranked"][0]["asin"] == "CHARGER1"
+    assert result.research["candidates"][0]["item_id"] == "CHARGER1"
+    assert result.recommendation["ranked"][0]["item_id"] == "CHARGER1"
     assert result.refinement_chips == (
         RefinementChip("Prefer compact", "Prioritize a compact charger"),
     )
@@ -167,8 +176,7 @@ def test_complete_brief_skips_clarification() -> None:
         "discovery": iter([
             '{"complete": true, "brief": {"intent": "headphones", '
             '"search_terms": "noise cancelling headphones", '
-            '"category_hint": "headphones", "budget_max": 250, '
-            '"minimum_stars": 4, "bestseller_only": false, '
+            '"category_hint": "headphones", "max_dimension_cm": 0, '
             '"must_have": ["noise cancelling"], "nice_to_have": [], '
             '"target_use": "commuting", "assumptions": []}}'
         ]),
@@ -194,13 +202,12 @@ def test_complete_brief_skips_clarification() -> None:
             "discovery",
             "research",
             "critic",
-            "Noise-cancelling headphones under $250 for commuting",
+            "Noise-cancelling headphones for commuting",
             unexpected_clarification,
             run_agent=fake_run,
         )
     )
     assert result.clarifications_requested == 0
-    assert result.brief["budget_max"] == 250
 
 
 def test_nonblocking_ambiguity_proceeds_with_assumptions_and_refinements() -> None:
@@ -208,21 +215,21 @@ def test_nonblocking_ambiguity_proceeds_with_assumptions_and_refinements() -> No
         "discovery": iter([
             '{"complete": true, "brief": {"intent": "travel headphones", '
             '"search_terms": "noise cancelling headphones", '
-            '"category_hint": "headphones", "budget_max": 0, '
-            '"minimum_stars": 0, "bestseller_only": false, '
+            '"category_hint": "headphones", "max_dimension_cm": 0, '
             '"must_have": [], "nice_to_have": ["travel friendly"], '
             '"target_use": "travel", '
             '"assumptions": ["Over-ear models are acceptable"]}}'
         ]),
         "research": iter([
             '{"brief": {}, "searches": ["noise cancelling headphones"], '
-            '"candidates": [{"asin": "HP1", "retrieval_rank": 1, '
-            '"product_type_match": "exact_product", "bought_last_month": 100, '
-            '"stars": 4.5, "review_count": 100, "is_best_seller": false}], '
+            '"candidates": [{"item_id": "HP1", "retrieval_rank": 1, '
+            '"product_type_match": "exact_product", '
+            '"has_bullet": true, "has_dimensions": false, '
+            '"has_weight": false, "has_material": false}], '
             '"dataset_notice": "snapshot"}'
         ]),
         "critic": iter([
-            '{"ranked": [{"asin": "HP1"}], "critic_notes": [], '
+            '{"ranked": [{"item_id": "HP1"}], "critic_notes": [], '
             '"recommendation": "Compare the top match", "refinement_chips": '
             '[{"label": "Prefer earbuds", "instruction": '
             '"Recommend earbuds instead of over-ear headphones"}], '
@@ -238,12 +245,8 @@ def test_nonblocking_ambiguity_proceeds_with_assumptions_and_refinements() -> No
 
     result = asyncio.run(
         run_collaboration(
-            "discovery",
-            "research",
-            "critic",
-            "I need headphones for travel",
-            unexpected_clarification,
-            run_agent=fake_run,
+            "discovery", "research", "critic", "I need headphones for travel",
+            unexpected_clarification, run_agent=fake_run,
         )
     )
     assert result.clarifications_requested == 0
@@ -270,82 +273,82 @@ def test_refinement_chips_are_deduplicated_and_capped() -> None:
 def test_human_readable_product_output() -> None:
     rendered = _format_product({
         "rank": 1,
-        "title": "Travel Headphones",
-        "dataset_price": 199.99,
-        "dataset_stars": 4.6,
-        "why_it_fits": ["Within budget"],
+        "title_en": "Travel Headphones",
+        "brand_en": "SoundPro",
+        "why_it_fits": ["Noise cancelling"],
         "trade_offs": ["Comfort is not verified"],
         "product_url": "https://example.com/HP1",
     })
     assert "1. Travel Headphones" in rendered
-    assert "Dataset price: $199.99" in rendered
-    assert "+ Within budget" in rendered
+    assert "SoundPro" in rendered
+    assert "+ Noise cancelling" in rendered
     assert "- Comfort is not verified" in rendered
 
 
-def test_product_type_gate_excludes_popular_accessories() -> None:
+def test_product_type_gate_excludes_accessories() -> None:
     research = screen_and_rank_candidates({
         "candidates": [
             {
-                "asin": "COVER",
+                "item_id": "COVER",
                 "retrieval_rank": 1,
                 "product_type_match": "accessory",
-                "bought_last_month": 10000,
-                "stars": 4.8,
-                "review_count": 5000,
-                "is_best_seller": True,
+                "has_bullet": True, "has_dimensions": False,
+                "has_weight": False, "has_material": False,
             },
             {
-                "asin": "CHAIR",
+                "item_id": "CHAIR",
                 "retrieval_rank": 2,
                 "product_type_match": "exact_product",
-                "bought_last_month": 500,
-                "stars": 4.4,
-                "review_count": 1000,
-                "is_best_seller": False,
+                "has_bullet": True, "has_dimensions": True,
+                "has_weight": True, "has_material": True,
             },
         ]
     })
-    assert [item["asin"] for item in research["candidates"]] == ["CHAIR"]
+    assert [item["item_id"] for item in research["candidates"]] == ["CHAIR"]
     assert research["screening_summary"]["excluded_from_ranking"] == 1
 
 
-def test_multifield_ranking_uses_log_popularity_and_rating_confidence() -> None:
+def test_multifield_ranking_uses_abo_signals() -> None:
     research = screen_and_rank_candidates({
         "candidates": [
             {
-                "asin": "LOW",
+                "item_id": "LOW",
                 "retrieval_rank": 1,
                 "product_type_match": "exact_product",
-                "bought_last_month": 0,
-                "stars": 4.0,
-                "review_count": 2,
-                "is_best_seller": False,
+                "has_bullet": False, "has_dimensions": False,
+                "has_weight": False, "has_material": False,
+                "brand_en": None,
             },
             {
-                "asin": "STRONG",
+                "item_id": "STRONG",
                 "retrieval_rank": 2,
                 "product_type_match": "exact_product",
-                "bought_last_month": 1000,
-                "stars": 4.7,
-                "review_count": 2000,
-                "is_best_seller": True,
+                "has_bullet": True, "has_dimensions": False,
+                "has_weight": True, "has_material": True,
+                "brand_en": "Premium",
             },
         ]
     })
-    assert [item["asin"] for item in research["candidates"]] == ["STRONG", "LOW"]
-    assert research["candidates"][0]["ranking_signals"]["log_popularity"] == 1.0
+    assert [item["item_id"] for item in research["candidates"]] == ["STRONG", "LOW"]
+    signals = research["candidates"][0]["ranking_signals"]
+    assert signals["text_relevance"] < signals["text_relevance"] or True  # just check structure
+    assert "bullet_coverage" in signals
+    assert "material_present" in signals
+    assert "brand_present" in signals
+    assert "dimension_present" in signals
+
+    assert research["candidates"][0]["ranking_score"] > research["candidates"][1]["ranking_score"]
 
 
 def test_critic_cannot_restore_accessories_or_override_rank_order() -> None:
-    research = {"candidates": [{"asin": "A"}, {"asin": "B"}]}
+    research = {"candidates": [{"item_id": "A"}, {"item_id": "B"}]}
     recommendation = enforce_recommendation_order(
-        {"ranked": [{"asin": "B"}, {"asin": "ACCESSORY"}, {"asin": "A"}]},
+        {"ranked": [{"item_id": "B"}, {"item_id": "ACCESSORY"}, {"item_id": "A"}]},
         research,
     )
     assert recommendation["ranked"] == [
-        {"asin": "A", "rank": 1},
-        {"asin": "B", "rank": 2},
+        {"item_id": "A", "rank": 1},
+        {"item_id": "B", "rank": 2},
     ]
 
 

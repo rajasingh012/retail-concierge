@@ -229,9 +229,10 @@ class ABOCatalogRepository:
                 """EXISTS (
                     SELECT 1 FROM listing_dimensions d
                     WHERE d.item_id = l.item_id
-                      AND d.dimension = 'length'
+                      AND d.dimension IN ('height', 'width', 'length')
                       AND d.value <= ?
                       AND d.unit = 'cm'
+                    LIMIT 1
                 )"""
             )
             params.append(max_dimension_cm)

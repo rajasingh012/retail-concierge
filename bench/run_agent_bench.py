@@ -1,4 +1,4 @@
-"""Benchmark the Discovery → Research → Critic agent collaboration."""
+"""Benchmark the Discovery → Research → Critic agent collaboration (ABO catalog)."""
 from __future__ import annotations
 
 import argparse
@@ -19,16 +19,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from infrastructure.agent_tools import build_tools, cache_stats, clear_cache
 from infrastructure.chat_clients import build_chat_client
-from infrastructure.database import ProductCatalogRepository
+from infrastructure.database import ABOCatalogRepository
 from use_cases import build_critic_agent, build_discovery_agent, build_research_agent
 from use_cases.collaboration import run_collaboration
 
 SAMPLE_SCENARIOS = [
-    "I need a lightweight carry-on spinner luggage under $180 with at least 4 stars.",
-    "Find noise cancelling over-ear headphones under $250 with strong ratings.",
-    "I need a 27-inch computer monitor under $300 for office work.",
-    "Recommend a laptop backpack under $80 for daily commuting.",
-    "Find a highly rated mechanical gaming keyboard under $120.",
+    "I need a lightweight carry-on spinner luggage with four wheels.",
+    "Find noise cancelling over-ear headphones with strong noise reduction.",
+    "I need a 27-inch computer monitor for office work.",
+    "Recommend a laptop backpack for daily commuting.",
+    "Find a mechanical gaming keyboard with RGB lighting.",
 ]
 
 
@@ -37,7 +37,6 @@ async def _bench_clarification_answer(_: str) -> str:
 
 
 def _gpu_snapshot() -> dict[str, Any]:
-    """Capture a compact AMD GPU snapshot when host tooling is available."""
     for command in (["amd-smi", "metric", "--json"], ["rocm-smi", "--json"]):
         if not shutil.which(command[0]):
             continue
@@ -51,7 +50,6 @@ def _gpu_snapshot() -> dict[str, Any]:
 
 
 def _vllm_metrics(url: str) -> dict[str, Any]:
-    """Capture relevant vLLM cache and request metrics without failing the bench."""
     try:
         with urllib.request.urlopen(url, timeout=3) as response:
             lines = response.read().decode("utf-8").splitlines()
@@ -66,7 +64,7 @@ def _vllm_metrics(url: str) -> dict[str, Any]:
 
 
 async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    repository = ProductCatalogRepository(args.database)
+    repository = ABOCatalogRepository(args.database)
     stats = repository.stats()
     client = build_chat_client(args.provider, args.model)
     tools = build_tools(repository)

@@ -23,11 +23,9 @@ or
 {"complete": true, "brief": {
   "intent": "short shopping goal",
   "search_terms": "2-6 concrete words likely to appear in product titles",
-  "category_hint": "short category phrase or empty string",
-  "budget_max": 0,
-  "minimum_stars": 0,
-  "bestseller_only": false,
-  "must_have": ["required traits"],
+  "category_hint": "short product-type phrase or empty string",
+  "max_dimension_cm": 0,
+  "must_have": ["required traits such as specific material, color, style, or dimensions"],
   "nice_to_have": ["optional traits"],
   "target_use": "use context",
   "assumptions": ["reasonable assumptions used to search without blocking"]
