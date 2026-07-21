@@ -1,6 +1,6 @@
 # RetailConcierge
 
-Three collaborating agents built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. The default is to show evidence-backed products immediately with explicit assumptions and refinement chips. Discovery asks at most two questions only when ambiguity blocks a valid search.
+Three collaborating agents built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. SQLite FTS5 retrieves candidates, the Research agent excludes accessories and uncertain product types, and deterministic catalog-signal ranking orders eligible products before Critic review. The default is to show results immediately with explicit assumptions and refinement chips.
 
 The catalog is an offline snapshot of the Amazon product dataset. The system never claims current prices, availability, shipping, or product specifications absent from the catalog, and it does not add items to a cart or make purchases.
 
@@ -29,6 +29,6 @@ DEEPSEEK_API_KEY=*** uv run python main.py
 
 ## Documentation
 
-- [architecture.md](architecture.md) — agents, tools, clarification loop, storage, and data flow
+- [architecture.md](architecture.md) — agents, product-type screening, ranking, storage, and data flow
 - [deploy.md](deploy.md) — catalog import and AMD MI300X deployment
 - [progress.md](progress.md) — forward-looking work only

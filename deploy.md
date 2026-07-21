@@ -68,7 +68,9 @@ DEEPSEEK_API_KEY=*** \
 
 - The catalog is offline and deterministic.
 - Product prices, ratings, review counts, and popularity are dataset snapshots.
+- `bought_last_month` is a log-scaled ranking signal, not exact average daily sales.
 - The application does not claim live availability, current pricing, shipping, or specifications absent from product titles.
 - The application does not add items to a cart or make purchases.
 - Only vLLM inference requires network access during the judge demo.
 - Discovery asks only when ambiguity blocks a valid search; otherwise it shows products with explicit assumptions and contextual refinement chips. Selecting a chip reruns the read-only recommendation flow.
+- SQLite FTS5 retrieves candidates; Research excludes accessories and uncertain product types before deterministic ranking. No vector database or Qdrant service is required.

@@ -79,6 +79,10 @@ def _show_result(result) -> None:
         print("\nEvidence notes:")
         for note in notes:
             print(f"- {note}")
+    screening = result.research.get("screening_summary", {})
+    excluded = screening.get("excluded_from_ranking", 0)
+    if excluded:
+        print(f"\nFiltered {excluded} accessories, unrelated, or uncertain items.")
     if notice := recommendation.get("dataset_notice"):
         print(f"\n{notice}")
     if result.refinement_chips:

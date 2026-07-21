@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+from use_cases.ranking import enforce_recommendation_order, screen_and_rank_candidates
+
 MAX_CLARIFICATIONS = 2
 
 
@@ -149,14 +151,18 @@ async def run_collaboration(
         research_agent,
         "Shopping brief:\n" + json.dumps(brief, ensure_ascii=False),
     )
-    research = parse_json_object(research_raw, "Research")
+    research = screen_and_rank_candidates(
+        parse_json_object(research_raw, "Research")
+    )
     critic_input = {"brief": brief, "research": research}
     recommendation_raw = await run_agent(
         critic_agent,
         "Review this evidence package:\n"
         + json.dumps(critic_input, ensure_ascii=False),
     )
-    recommendation = parse_json_object(recommendation_raw, "Critic")
+    recommendation = enforce_recommendation_order(
+        parse_json_object(recommendation_raw, "Critic"), research
+    )
     refinement_chips = parse_refinement_chips(recommendation)
     return CollaborationResult(
         brief=brief,

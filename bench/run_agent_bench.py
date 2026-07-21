@@ -89,12 +89,15 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             )
             elapsed = time.perf_counter() - started
             after = cache_stats()
+            screening = result.research.get("screening_summary", {})
             row = {
                 "scenario": index,
                 "request": scenario,
                 "latency_sec": round(elapsed, 3),
                 "clarifications_requested": result.clarifications_requested,
                 "refinement_chips": len(result.refinement_chips),
+                "exact_products": screening.get("eligible_exact_products", 0),
+                "excluded_by_product_type": screening.get("excluded_from_ranking", 0),
                 "candidates_researched": len(result.research.get("candidates", [])),
                 "recommendations": len(result.recommendation.get("ranked", [])),
                 "cache_hits_delta": after["hits"] - before["hits"],
@@ -103,7 +106,8 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             rows.append(row)
             print(
                 f"[bench] {index}/{len(scenarios)} {row['latency_sec']}s; "
-                f"evidence={row['candidates_researched']} ranked={row['recommendations']}"
+                f"eligible={row['exact_products']} excluded={row['excluded_by_product_type']} "
+                f"ranked={row['recommendations']}"
             )
     finally:
         repository.close()

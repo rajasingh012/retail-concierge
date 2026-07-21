@@ -76,7 +76,7 @@ def build_tools(repository: ProductCatalogRepository) -> list[Any]:
         max_price: float = 0,
         min_stars: float = 0,
         bestseller_only: bool = False,
-        limit: int = 10,
+        limit: int = 50,
     ) -> str:
         """Search the offline Amazon catalog using title text and exact filters.
 
@@ -86,10 +86,12 @@ def build_tools(repository: ProductCatalogRepository) -> list[Any]:
             max_price: Maximum listed dataset price; 0 means no ceiling.
             min_stars: Minimum rating from 0 to 5; 0 means no minimum.
             bestseller_only: If true, return only products marked bestseller.
-            limit: Maximum products to return, from 1 to 50.
+            limit: Candidate-pool size, from 1 to 50; default 50 so the Research
+                agent can remove accessories before deterministic reranking.
 
         Returns:
-            JSON product evidence. Prices and ratings are dataset snapshots, not live data.
+            JSON product evidence in BM25 retrieval order. Prices, ratings, and
+            bought-last-month popularity are dataset snapshots, not live data.
         """
         key = json.dumps(
             [
@@ -102,15 +104,15 @@ def build_tools(repository: ProductCatalogRepository) -> list[Any]:
             key,
             lambda: json.dumps(
                 [
-                    product.to_dict()
-                    for product in repository.search(
+                    {**product.to_dict(), "retrieval_rank": retrieval_rank}
+                    for retrieval_rank, product in enumerate(repository.search(
                         query,
                         category_id=category_id,
                         max_price=max_price,
                         min_stars=min_stars,
                         bestseller_only=bestseller_only,
                         limit=limit,
-                    )
+                    ), start=1)
                 ],
                 ensure_ascii=False,
             ),

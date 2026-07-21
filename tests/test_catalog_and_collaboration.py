@@ -17,6 +17,7 @@ from use_cases.collaboration import (
     parse_refinement_chips,
     run_collaboration,
 )
+from use_cases.ranking import enforce_recommendation_order, screen_and_rank_candidates
 
 
 def _write_dataset(root: Path) -> tuple[Path, Path]:
@@ -109,6 +110,7 @@ def test_tool_cache_tracks_hits(tmp_path: Path) -> None:
     second = search_catalog(**kwargs)
     assert first == second
     assert json.loads(first)[0]["asin"] == "CHAIR1"
+    assert json.loads(first)[0]["retrieval_rank"] == 1
     assert cache_stats() == {"hits": 1, "misses": 1, "size": 1, "maxsize": 512}
     repository.close()
 
@@ -125,7 +127,9 @@ def test_blocking_ambiguity_requests_clarification() -> None:
         ]),
         "research": iter([
             '{"brief": {}, "searches": ["ThinkPad USB-C charger"], '
-            '"candidates": [{"asin": "CHARGER1"}], '
+            '"candidates": [{"asin": "CHARGER1", "retrieval_rank": 1, '
+            '"product_type_match": "exact_product", "bought_last_month": 10, '
+            '"stars": 4.5, "review_count": 100, "is_best_seller": false}], '
             '"dataset_notice": "snapshot"}'
         ]),
         "critic": iter([
@@ -212,7 +216,10 @@ def test_nonblocking_ambiguity_proceeds_with_assumptions_and_refinements() -> No
         ]),
         "research": iter([
             '{"brief": {}, "searches": ["noise cancelling headphones"], '
-            '"candidates": [{"asin": "HP1"}], "dataset_notice": "snapshot"}'
+            '"candidates": [{"asin": "HP1", "retrieval_rank": 1, '
+            '"product_type_match": "exact_product", "bought_last_month": 100, '
+            '"stars": 4.5, "review_count": 100, "is_best_seller": false}], '
+            '"dataset_notice": "snapshot"}'
         ]),
         "critic": iter([
             '{"ranked": [{"asin": "HP1"}], "critic_notes": [], '
@@ -274,6 +281,72 @@ def test_human_readable_product_output() -> None:
     assert "Dataset price: $199.99" in rendered
     assert "+ Within budget" in rendered
     assert "- Comfort is not verified" in rendered
+
+
+def test_product_type_gate_excludes_popular_accessories() -> None:
+    research = screen_and_rank_candidates({
+        "candidates": [
+            {
+                "asin": "COVER",
+                "retrieval_rank": 1,
+                "product_type_match": "accessory",
+                "bought_last_month": 10000,
+                "stars": 4.8,
+                "review_count": 5000,
+                "is_best_seller": True,
+            },
+            {
+                "asin": "CHAIR",
+                "retrieval_rank": 2,
+                "product_type_match": "exact_product",
+                "bought_last_month": 500,
+                "stars": 4.4,
+                "review_count": 1000,
+                "is_best_seller": False,
+            },
+        ]
+    })
+    assert [item["asin"] for item in research["candidates"]] == ["CHAIR"]
+    assert research["screening_summary"]["excluded_from_ranking"] == 1
+
+
+def test_multifield_ranking_uses_log_popularity_and_rating_confidence() -> None:
+    research = screen_and_rank_candidates({
+        "candidates": [
+            {
+                "asin": "LOW",
+                "retrieval_rank": 1,
+                "product_type_match": "exact_product",
+                "bought_last_month": 0,
+                "stars": 4.0,
+                "review_count": 2,
+                "is_best_seller": False,
+            },
+            {
+                "asin": "STRONG",
+                "retrieval_rank": 2,
+                "product_type_match": "exact_product",
+                "bought_last_month": 1000,
+                "stars": 4.7,
+                "review_count": 2000,
+                "is_best_seller": True,
+            },
+        ]
+    })
+    assert [item["asin"] for item in research["candidates"]] == ["STRONG", "LOW"]
+    assert research["candidates"][0]["ranking_signals"]["log_popularity"] == 1.0
+
+
+def test_critic_cannot_restore_accessories_or_override_rank_order() -> None:
+    research = {"candidates": [{"asin": "A"}, {"asin": "B"}]}
+    recommendation = enforce_recommendation_order(
+        {"ranked": [{"asin": "B"}, {"asin": "ACCESSORY"}, {"asin": "A"}]},
+        research,
+    )
+    assert recommendation["ranked"] == [
+        {"asin": "A", "rank": 1},
+        {"asin": "B", "rank": 2},
+    ]
 
 
 def test_parse_json_object_accepts_fence_and_rejects_array() -> None:

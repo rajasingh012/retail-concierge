@@ -18,8 +18,8 @@ main.py          composition root and interactive orchestration
 | Agent | Responsibility | Tools |
 |---|---|---|
 | Discovery | Build a structured brief, record assumptions, and ask only blocking clarification questions | None |
-| Catalog Research | Query only the offline catalog and label evidence gaps | `find_categories`, `search_catalog` |
-| Critic | Reject unsupported matches, rank evidence, and propose contextual refinement chips | None |
+| Catalog Research | Retrieve candidates, classify product identity, and label evidence gaps | `find_categories`, `search_catalog` |
+| Critic | Enforce the brief, preserve eligible-product order, and propose contextual refinement chips | None |
 
 Each agent is one MAF `Agent`. The Catalog Research agent uses schema-aware MAF tools; the framework validates each tool call, executes the read-only Python function, and returns its JSON evidence to the model.
 
@@ -47,7 +47,9 @@ products(id INTEGER PK, asin UNIQUE, ..., category_id FK -> categories.id)
 product_fts(title, external content -> products.id)
 ```
 
-FTS5 searches product titles. SQL applies exact category, price, rating, bestseller, and result-limit filters before evidence enters model context. Products with zero dataset price are excluded from recommendations.
+FTS5 searches product titles and returns up to 50 candidates in BM25 order. SQL applies exact category, price, rating, and bestseller filters first. Research then classifies each title as `exact_product`, `accessory`, `unrelated`, or `uncertain`; only exact products remain eligible.
+
+Eligible candidates are ordered deterministically by 55% retrieval relevance, 25% log-scaled `bought_last_month`, 15% rating confidence from stars and review count, and 5% bestseller status. Log scaling prevents a single high-volume item from dominating. Product identity is an eligibility rule, so a popular accessory can never outrank the requested product. SQLite and FTS5 remain the only search infrastructure.
 
 ## Data flow
 
@@ -61,10 +63,13 @@ Discovery Agent -- blocking ambiguity? --> user clarification (maximum two)
 structured brief
     |
     v
-Catalog Research Agent -- find_categories, search_catalog
-    |                                   SQLite FTS5 + indexed filters
-    v                                   (1.4M+ product dataset)
-research evidence + explicit evidence gaps
+Catalog Research Agent -- find_categories, search_catalog (top 50)
+    |                                    SQLite FTS5 + indexed filters
+    v                                    (1.4M+ product dataset)
+LLM product-type screening -- keep exact products only
+    |
+    v
+deterministic multi-field ranking + explicit evidence gaps
     |
     v
 Critic Agent --> ranked recommendation + refinement chips
@@ -83,5 +88,6 @@ The system never claims live availability or current pricing. Prices, ratings, r
 - refinement-chip count per scenario
 - catalog-tool cache hits and misses
 - candidate and recommendation counts
+- exact-product and excluded-product counts
 - AMD GPU snapshots when available
 - vLLM prefix-cache/request metrics when available

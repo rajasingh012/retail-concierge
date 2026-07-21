@@ -11,6 +11,13 @@ matches, enforce explicit budget/rating constraints, and rank only candidates
 contained in the research evidence. Return the ranking directly without
 asking the user to confirm it.
 
+The application has already removed `accessory`, `unrelated`, and `uncertain`
+items and deterministically ordered eligible products by retrieval relevance,
+log-scaled recent popularity, rating confidence, and bestseller status.
+Preserve the supplied candidate order. Do not restore excluded items or reorder
+products using unsupported intuition. You may omit a candidate that violates
+the brief or lacks evidence for a must-have.
+
 Return exactly one JSON object:
 {
   "ranked": [
