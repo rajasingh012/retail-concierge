@@ -32,7 +32,8 @@ async def run_agent_text(agent, prompt: str) -> str:
 
 
 def parse_json_object(text: str, stage: str) -> dict:
-    """Parse a JSON object, accepting a fenced JSON block from weaker models."""
+    """Parse a JSON object, accepting fenced blocks and extracting from prose."""
+    # Strip and try direct parse
     candidate = text.strip()
     if candidate.startswith("```"):
         lines = candidate.splitlines()
@@ -43,11 +44,30 @@ def parse_json_object(text: str, stage: str) -> dict:
         candidate = "\n".join(lines).strip()
     try:
         value = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{stage} agent returned invalid JSON: {text[:300]}") from exc
-    if not isinstance(value, dict):
-        raise ValueError(f"{stage} agent must return a JSON object")
-    return value
+        if isinstance(value, dict):
+            return value
+    except json.JSONDecodeError:
+        pass
+    # Try to find the first JSON object inside the text via brace matching
+    for start in range(len(candidate)):
+        if candidate[start] == "{":
+            depth = 0
+            for end in range(start, len(candidate)):
+                ch = candidate[end]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        block = candidate[start : end + 1]
+                        try:
+                            value = json.loads(block)
+                            if isinstance(value, dict):
+                                return value
+                        except json.JSONDecodeError:
+                            continue
+                        break
+    raise ValueError(f"{stage} agent returned invalid JSON: {text[:500]}")
 
 
 def parse_refinement_chips(recommendation: dict) -> tuple[RefinementChip, ...]:

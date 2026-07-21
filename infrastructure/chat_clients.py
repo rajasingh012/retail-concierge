@@ -1,7 +1,7 @@
 """Chat client factory — provider-agnostic LLM access.
 
-Uses Microsoft Agent Framework's `OpenAIChatClient`, which natively speaks
-the OpenAI Chat Completions wire protocol. Both vLLM (on AMD Dev Cloud
+Uses Microsoft Agent Framework's `OpenAIChatCompletionClient`, which natively
+speaks the OpenAI Chat Completions wire protocol. Both vLLM (on AMD Dev Cloud
 MI300X) and DeepSeek expose this endpoint, so swapping backends is just a
 `base_url` change.
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 
 
 # ---------- provider registry ----------
@@ -27,14 +27,14 @@ PROVIDERS: dict[str, tuple[str, str | None]] = {
 }
 
 
-def build_chat_client(provider: str, model: str, **overrides: Any) -> OpenAIChatClient:
-    """Build an `OpenAIChatClient` from a provider name and model.
+def build_chat_client(provider: str, model: str, **overrides: Any) -> OpenAIChatCompletionClient:
+    """Build an `OpenAIChatCompletionClient` from a provider name and model.
 
     Args:
         provider: Key in PROVIDERS (e.g. "vllm", "deepseek").
         model: Model name (provider-specific, e.g. "google/gemma-3-27b-it"
                for vLLM, "deepseek-chat" for DeepSeek).
-        **overrides: Forwarded to `OpenAIChatClient.__init__`. Recognized
+        **overrides: Forwarded to `OpenAIChatCompletionClient.__init__`. Recognized
             keys: base_url, api_key.
     """
     try:
@@ -52,4 +52,4 @@ def build_chat_client(provider: str, model: str, **overrides: Any) -> OpenAIChat
         api_key = os.environ.get(env_key)
     api_key = api_key or "EMPTY"  # vLLM doesn't require auth; OpenAI SDK still wants a non-empty string
 
-    return OpenAIChatClient(model=model, api_key=api_key, base_url=base_url, **overrides)
+    return OpenAIChatCompletionClient(model=model, api_key=api_key, base_url=base_url, **overrides)

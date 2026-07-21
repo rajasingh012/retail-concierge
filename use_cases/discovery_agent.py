@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from agent_framework import Agent
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 
 DISCOVERY_INSTRUCTIONS = """\
 You are the Discovery Agent in a retail agent team. Build a useful shopping
@@ -36,9 +36,14 @@ Those are non-blocking when a useful search is still possible. Ask at most one
 question at a time. The orchestrator caps the total at two. Use prior answers
 and converge instead of repeating a question. A zero numeric value means the
 user did not set that filter. Never silently relax an explicit constraint.
-Catalog searches and recommendations run automatically. Return JSON only.
+Catalog searches and recommendations run automatically.
+
+IMPORTANT — response format enforcement:
+Return exactly one JSON object. Do not include any text before or after it.
+Do not explain your reasoning or ask questions outside the expected format.
+Any non-JSON text will cause a parsing error.
 """
 
 
-def build_discovery_agent(client: OpenAIChatClient) -> Agent:
+def build_discovery_agent(client: OpenAIChatCompletionClient) -> Agent:
     return Agent(client=client, instructions=DISCOVERY_INSTRUCTIONS)

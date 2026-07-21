@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent_framework import Agent
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 
 RESEARCH_INSTRUCTIONS = """\
 You are the Catalog Research Agent in a retail agent team. You receive a JSON
@@ -60,9 +60,16 @@ Return exactly one JSON object. The tools are read-only and run automatically.
 
 Return at most 50 classified candidates across all searches. Never infer
 specifications that are absent from titles or catalog fields. Never claim live
-pricing, ratings, or availability. Return JSON only.
+pricing, ratings, or availability.
+
+IMPORTANT — response format enforcement:
+Your ENTIRE response must be a single JSON object matching the schema defined
+above. Do not include any text before the JSON object or after it. Do not
+explain your reasoning, narrate your search process, or ask questions. Output
+only the JSON object. Any text that is not part of the JSON object will cause a
+parsing error and the program will crash.
 """
 
 
-def build_research_agent(client: OpenAIChatClient, tools: list[Any]) -> Agent:
+def build_research_agent(client: OpenAIChatCompletionClient, tools: list[Any]) -> Agent:
     return Agent(client=client, instructions=RESEARCH_INSTRUCTIONS, tools=tools)

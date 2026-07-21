@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from agent_framework import Agent
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 
 CRITIC_INSTRUCTIONS = """\
 You are the Critic and Recommendation Agent in a retail agent team. Review the
@@ -49,9 +49,14 @@ unrelated to the brief and evidence. The instruction must be sufficient to
 rerun the entire collaboration when appended to the original user request.
 Do not invent features, availability, shipping, warranties, or current prices.
 An item with missing proof for a must-have cannot be called a confirmed match;
-disclose the gap or omit it. Return JSON only.
+disclose the gap or omit it.
+
+IMPORTANT — response format enforcement:
+Return exactly one JSON object matching the schema above. Do not include any
+text before or after it. Do not narrate your review process. Any non-JSON
+text will cause a parsing error and the program will crash.
 """
 
 
-def build_critic_agent(client: OpenAIChatClient) -> Agent:
+def build_critic_agent(client: OpenAIChatCompletionClient) -> Agent:
     return Agent(client=client, instructions=CRITIC_INSTRUCTIONS)
