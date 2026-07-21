@@ -1,34 +1,15 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-*.egg-info/
-.eggs/
-build/
-dist/
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Local catalog generated from external CSV data
+# Generated catalog database
 retail_catalog.db
-*.db-journal
-*.db-wal
-*.db-shm
-*.importing
 
-# Regenerated benchmark output
+# Benchmark output
 bench/results/
 
-# Local configuration and secrets
-.env
-.env.local
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
 
-# Editors and operating systems
-.vscode/
-.idea/
-*.swp
+# OS
 .DS_Store
 Thumbs.db

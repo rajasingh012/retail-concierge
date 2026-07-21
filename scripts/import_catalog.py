@@ -1,10 +1,12 @@
-#!/usr/bin/env python3
-"""Import the Amazon product CSVs into an indexed SQLite catalog."""
+"""Import the Amazon Berkeley Objects listings archive into the SQLite catalog."""
 from __future__ import annotations
 
 import argparse
-import csv
+import gzip
+import hashlib
+import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -13,105 +15,247 @@ from typing import Iterable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from infrastructure.database import BASE_SCHEMA, FTS_SCHEMA, INDEX_SCHEMA
+from infrastructure.database import DIMENSIONS_SCHEMA, FTS_SCHEMA, INDEX_SCHEMA, TEXT_VALUES_SCHEMA, create_schema
 
-CATEGORY_FIELDS = ["id", "category_name"]
-PRODUCT_FIELDS = [
-    "asin", "title", "imgUrl", "productURL", "stars", "reviews", "price",
-    "listPrice", "category_id", "isBestSeller", "boughtInLastMonth",
-]
-INSERT_PRODUCTS = """
-INSERT INTO products(
-    asin, title, image_url, product_url, stars, review_count, price,
-    list_price, category_id, is_best_seller, bought_last_month
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
+SHARD_PATTERN = "listings_*.json.gz"
 
 
-def _require_fields(reader: csv.DictReader, expected: list[str], path: Path) -> None:
-    if reader.fieldnames != expected:
-        raise ValueError(
-            f"Unexpected columns in {path}: {reader.fieldnames}; expected {expected}"
+def _read_shards(archive_root: Path) -> Iterable[dict]:
+    metadata_dir = archive_root / "listings" / "metadata"
+    if not metadata_dir.is_dir():
+        raise FileNotFoundError(
+            f"Expected {metadata_dir}. Extract the ABO archive first."
         )
+    for shard in sorted(metadata_dir.glob(SHARD_PATTERN)):
+        with gzip.open(shard, "rt", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                yield json.loads(line)
 
 
-def _read_categories(path: Path) -> list[tuple[int, str]]:
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        _require_fields(reader, CATEGORY_FIELDS, path)
-        rows = [(int(row["id"]), row["category_name"].strip()) for row in reader]
-    if not rows:
-        raise ValueError(f"No categories found in {path}")
-    return rows
+def _product_url(item_id: str, marketplace: str, country: str) -> str:
+    if marketplace:
+        return f"https://www.{marketplace}/dp/{item_id}"
+    digest = hashlib.sha1(item_id.encode("utf-8")).hexdigest()[:8]
+    suffix = f"amazon.{country.lower()}" if country else "amazon"
+    return f"https://www.{suffix}/dp/{item_id}?ref=abo#{digest}"
 
 
-def _product_rows(
-    path: Path, category_ids: set[int], limit: int = 0
-) -> Iterable[tuple[object, ...]]:
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        _require_fields(reader, PRODUCT_FIELDS, path)
-        for index, row in enumerate(reader, start=1):
-            if limit and index > limit:
-                break
-            category_id = int(row["category_id"])
-            if category_id not in category_ids:
-                raise ValueError(
-                    f"Unknown category_id={category_id} at product row {index}"
-                )
-            best_seller = row["isBestSeller"].strip().lower()
-            if best_seller not in {"true", "false"}:
-                raise ValueError(
-                    f"Invalid isBestSeller={row['isBestSeller']!r} at row {index}"
-                )
-            yield (
-                row["asin"].strip(),
-                row["title"].strip(),
-                row["imgUrl"].strip(),
-                row["productURL"].strip(),
-                float(row["stars"]),
-                int(row["reviews"]),
-                float(row["price"]),
-                float(row["listPrice"]),
-                category_id,
-                int(best_seller == "true"),
-                int(row["boughtInLastMonth"]),
-            )
+def _first_product_type(product_type) -> str | None:
+    if not product_type:
+        return None
+    if isinstance(product_type, list) and product_type:
+        v = product_type[0].get("value") if isinstance(product_type[0], dict) else None
+        return v or None
+    return None
 
 
-def _batched(rows: Iterable[tuple[object, ...]], size: int = 10_000):
-    batch: list[tuple[object, ...]] = []
-    for row in rows:
-        batch.append(row)
-        if len(batch) == size:
-            yield batch
-            batch = []
-    if batch:
-        yield batch
+_TEXT_VALUE_ATTRS = (
+    "bullet_point",
+    "color",
+    "material",
+    "style",
+    "model_name",
+    "model_number",
+    "pattern",
+    "finish_type",
+    "fabric_type",
+    "item_shape",
+    "item_keywords",
+)
+
+
+def _text_records(item_id: str, raw: dict) -> list[tuple[str, str, str | None, str | None]]:
+    out: list[tuple[str, str, str | None, str | None]] = []
+    for attr in _TEXT_VALUE_ATTRS:
+        values = raw.get(attr)
+        if not isinstance(values, list):
+            continue
+        for entry in values:
+            if not isinstance(entry, dict):
+                continue
+            value = entry.get("value")
+            language = entry.get("language_tag")
+            if value:
+                out.append((item_id, attr, str(value), language))
+    return out
+
+
+def _dimension_records(item_id: str, raw: dict) -> list[tuple[str, float, str, int]]:
+    out: list[tuple[str, float, str, int]] = []
+    item_dimensions = raw.get("item_dimensions")
+    if isinstance(item_dimensions, dict):
+        for key in ("height", "width", "length"):
+            entry = item_dimensions.get(key)
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("normalized_value"):
+                nv = entry["normalized_value"]
+                v = nv.get("value")
+                unit = nv.get("unit")
+                if v is not None:
+                    out.append((key, float(v), str(unit or ""), 1))
+                continue
+            v = entry.get("value")
+            unit = entry.get("unit")
+            if v is not None:
+                out.append((key, float(v), str(unit or ""), 0))
+    weight = raw.get("item_weight")
+    if isinstance(weight, list) and weight:
+        entry = weight[0]
+        if isinstance(entry, dict):
+            if entry.get("normalized_value"):
+                nv = entry["normalized_value"]
+                v = nv.get("value")
+                unit = nv.get("unit")
+                if v is not None:
+                    out.append(("weight", float(v), str(unit or ""), 1))
+            else:
+                v = entry.get("value")
+                unit = entry.get("unit")
+                if v is not None:
+                    out.append(("weight", float(v), str(unit or ""), 0))
+    elif isinstance(weight, dict):
+        if weight.get("normalized_value"):
+            nv = weight["normalized_value"]
+            v = nv.get("value")
+            unit = nv.get("unit")
+            if v is not None:
+                out.append(("weight", float(v), str(unit or ""), 1))
+        else:
+            v = weight.get("value")
+            unit = weight.get("unit")
+            if v is not None:
+                out.append(("weight", float(v), str(unit or ""), 0))
+    return out
+
+
+def _english_text(values):
+    if not isinstance(values, list):
+        return None
+    for entry in values:
+        if not isinstance(entry, dict):
+            continue
+        lang = entry.get("language_tag") or ""
+        if lang.lower().startswith("en"):
+            v = entry.get("value")
+            if v:
+                return str(v)
+    if values and isinstance(values[0], dict):
+        v = values[0].get("value")
+        if v:
+            return str(v)
+    return None
+
+
+def _populate(
+    conn: sqlite3.Connection, archive_root: Path
+) -> tuple[int, int, int]:
+    """Insert all listings and their text/dimension evidence into the schema."""
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    insert_listing = """
+    INSERT INTO listings(
+        item_id, marketplace, country, product_type, title_en, brand_en,
+        main_image_id, has_bullet, has_dimensions, has_weight, has_material,
+        product_url
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    insert_text = (
+        "INSERT INTO listing_text_values(listing_id, item_id, attribute, value, language) "
+        "VALUES (?, ?, ?, ?, ?)"
+    )
+    insert_dim = (
+        "INSERT INTO listing_dimensions(listing_id, item_id, dimension, value, unit, is_normalized) "
+        "VALUES (?, ?, ?, ?, ?, ?)"
+    )
+
+    BATCH = 5000
+    listings = 0
+    text_values = 0
+    dimension_rows = 0
+    text_batch: list[tuple] = []
+    dim_batch: list[tuple] = []
+
+    for raw in _read_shards(archive_root):
+        item_id = raw.get("item_id")
+        if not item_id:
+            continue
+        title_en = _english_text(raw.get("item_name")) or ""
+        brand_en = _english_text(raw.get("brand"))
+        marketplace = str(raw.get("marketplace") or "")
+        country = str(raw.get("country") or "")
+        product_type = _first_product_type(raw.get("product_type"))
+        main_image_id = raw.get("main_image_id")
+        url = _product_url(item_id, marketplace, country)
+
+        # Check if this URL already exists (ABO has 1,805 duplicate ASIN+marketplace pairs).
+        existing = conn.execute(
+            "SELECT id FROM listings WHERE product_url = ?", (url,)
+        ).fetchone()
+        if existing is not None:
+            continue
+
+        conn.execute(
+            insert_listing,
+            (
+                item_id, marketplace, country, product_type, title_en, brand_en,
+                main_image_id,
+                1 if raw.get("bullet_point") else 0,
+                1 if isinstance(raw.get("item_dimensions"), dict) else 0,
+                1 if raw.get("item_weight") else 0,
+                1 if raw.get("material") else 0,
+                url,
+            ),
+        )
+        listing_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        listings += 1
+
+        for tv in _text_records(item_id, raw):
+            text_batch.append((listing_id, tv[0], tv[1], tv[2], tv[3]))
+        for d in _dimension_records(item_id, raw):
+            dim_batch.append((listing_id, item_id, d[0], d[1], d[2], d[3]))
+
+        if len(text_batch) >= BATCH:
+            conn.executemany(insert_text, text_batch)
+            text_values += len(text_batch)
+            text_batch.clear()
+        if len(dim_batch) >= BATCH:
+            conn.executemany(insert_dim, dim_batch)
+            dimension_rows += len(dim_batch)
+            dim_batch.clear()
+
+    if text_batch:
+        conn.executemany(insert_text, text_batch)
+        text_values += len(text_batch)
+    if dim_batch:
+        conn.executemany(insert_dim, dim_batch)
+        dimension_rows += len(dim_batch)
+
+    return listings, text_values, dimension_rows
 
 
 def import_catalog(
-    products_csv: Path,
-    categories_csv: Path,
+    archive_root: Path,
     database: Path,
-    *,
-    limit: int = 0,
 ) -> dict[str, int | float]:
     """Build a new catalog beside the target and atomically replace it."""
-    products_csv = products_csv.expanduser().resolve()
-    categories_csv = categories_csv.expanduser().resolve()
+    archive_root = archive_root.expanduser().resolve()
     database = database.expanduser().resolve()
-    if not products_csv.is_file() or not categories_csv.is_file():
-        raise FileNotFoundError("Both product and category CSV files are required")
-
+    if not (archive_root / "listings" / "metadata").is_dir():
+        raise FileNotFoundError(
+            f"ABO archive not extracted at {archive_root}. "
+            "Run: tar -xf abo-listings.tar -C <archive_root>."
+        )
     database.parent.mkdir(parents=True, exist_ok=True)
     temp_db = database.with_name(f".{database.name}.importing")
     temp_db.unlink(missing_ok=True)
-    categories = _read_categories(categories_csv)
-    category_ids = {row[0] for row in categories}
     started = time.perf_counter()
-    inserted = 0
     conn: sqlite3.Connection | None = None
+    listings = 0
+    text_values = 0
+    dimension_rows = 0
 
     try:
         conn = sqlite3.connect(temp_db)
@@ -119,28 +263,14 @@ def import_catalog(
         conn.execute("PRAGMA journal_mode = OFF")
         conn.execute("PRAGMA synchronous = OFF")
         conn.execute("PRAGMA temp_store = MEMORY")
-        conn.executescript(BASE_SCHEMA)
-        conn.executemany("INSERT INTO categories(id, name) VALUES (?, ?)", categories)
-
-        for batch in _batched(_product_rows(products_csv, category_ids, limit)):
-            conn.executemany(INSERT_PRODUCTS, batch)
-            inserted += len(batch)
-            if inserted % 100_000 == 0:
-                print(f"[import] {inserted:,} products", flush=True)
+        create_schema(conn)
+        listings, text_values, dimension_rows = _populate(conn, archive_root)
         conn.commit()
-
-        print("[import] building indexes and FTS5 catalog", flush=True)
-        conn.executescript(INDEX_SCHEMA)
-        conn.executescript(FTS_SCHEMA)
-        conn.execute("INSERT INTO product_fts(product_fts) VALUES ('rebuild')")
-        conn.commit()
-
         fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
         integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
         if fk_errors or integrity != "ok":
             raise RuntimeError(
-                f"Catalog verification failed: foreign_keys={fk_errors[:3]}, "
-                f"integrity={integrity}"
+                f"Catalog verification failed: foreign_keys={fk_errors[:3]}, integrity={integrity}"
             )
         conn.close()
         conn = None
@@ -153,36 +283,26 @@ def import_catalog(
 
     elapsed = round(time.perf_counter() - started, 2)
     return {
-        "products": inserted,
-        "categories": len(categories),
+        "listings": listings,
+        "text_values": text_values,
+        "dimensions": dimension_rows,
         "seconds": elapsed,
         "database_bytes": database.stat().st_size,
     }
 
 
 def cli() -> None:
-    default_archive = Path.home() / "Downloads" / "archive"
+    default_archive = Path("data/abo")
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--products", type=Path,
-        default=default_archive / "amazon_products.csv",
-    )
-    parser.add_argument(
-        "--categories", type=Path,
-        default=default_archive / "amazon_categories.csv",
-    )
+    parser.add_argument("--archive", type=Path, default=default_archive)
     parser.add_argument("--database", type=Path, default=Path("retail_catalog.db"))
-    parser.add_argument(
-        "--limit", type=int, default=0,
-        help="Import only the first N products; 0 imports the full dataset.",
-    )
     args = parser.parse_args()
-    result = import_catalog(
-        args.products, args.categories, args.database, limit=max(args.limit, 0)
-    )
+    result = import_catalog(args.archive, args.database)
     print(
-        f"[import] complete: {result['products']:,} products, "
-        f"{result['categories']} categories, {result['seconds']}s, "
+        f"[import] complete: {result['listings']:,} listings, "
+        f"{result['text_values']:,} text values, "
+        f"{result['dimensions']:,} dimensions, "
+        f"{result['seconds']}s, "
         f"{result['database_bytes'] / (1024 ** 2):.1f} MiB"
     )
 

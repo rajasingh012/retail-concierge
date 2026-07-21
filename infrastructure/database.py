@@ -1,75 +1,108 @@
-"""Indexed SQLite catalog over the offline Amazon dataset."""
+"""Indexed SQLite catalog over the Amazon Berkeley Objects metadata archive."""
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
 from pathlib import Path
 
-from domain.entities import CatalogProduct
+# Short English-language tag preferred for flattening. When absent, fall back
+# to any English text, then any value.
+ENGLISH_LANG_RE = re.compile(r"^en(_|$)", re.IGNORECASE)
 
 BASE_SCHEMA = """
 PRAGMA foreign_keys = ON;
-CREATE TABLE categories (
-    id   INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE
-);
-CREATE TABLE products (
-    id                    INTEGER PRIMARY KEY,
-    asin                  TEXT NOT NULL UNIQUE,
-    title                 TEXT NOT NULL,
-    image_url             TEXT NOT NULL,
-    product_url           TEXT NOT NULL UNIQUE,
-    stars                 REAL NOT NULL CHECK (stars BETWEEN 0 AND 5),
-    review_count          INTEGER NOT NULL CHECK (review_count >= 0),
-    price                 REAL NOT NULL CHECK (price >= 0),
-    list_price            REAL NOT NULL CHECK (list_price >= 0),
-    category_id           INTEGER NOT NULL REFERENCES categories(id),
-    is_best_seller        INTEGER NOT NULL CHECK (is_best_seller IN (0, 1)),
-    bought_last_month     INTEGER NOT NULL CHECK (bought_last_month >= 0)
+CREATE TABLE listings (
+    id                INTEGER PRIMARY KEY,
+    item_id           TEXT NOT NULL,
+    marketplace       TEXT NOT NULL,
+    country           TEXT NOT NULL,
+    product_type      TEXT,
+    title_en          TEXT NOT NULL,
+    brand_en          TEXT,
+    main_image_id     TEXT,
+    has_bullet        INTEGER NOT NULL CHECK (has_bullet IN (0, 1)),
+    has_dimensions    INTEGER NOT NULL CHECK (has_dimensions IN (0, 1)),
+    has_weight        INTEGER NOT NULL CHECK (has_weight IN (0, 1)),
+    has_material      INTEGER NOT NULL CHECK (has_material IN (0, 1)),
+    product_url       TEXT NOT NULL UNIQUE
 );
 """
 
 INDEX_SCHEMA = """
-CREATE INDEX idx_products_category ON products(category_id);
-CREATE INDEX idx_products_price ON products(price);
-CREATE INDEX idx_products_stars ON products(stars);
-CREATE INDEX idx_products_popularity ON products(bought_last_month DESC);
-CREATE INDEX idx_products_category_price_stars
-    ON products(category_id, price, stars DESC);
+CREATE INDEX idx_listings_product_type ON listings(product_type);
+CREATE INDEX idx_listings_marketplace ON listings(marketplace);
 """
 
 FTS_SCHEMA = """
-CREATE VIRTUAL TABLE product_fts USING fts5(
-    title,
-    content='products',
+CREATE VIRTUAL TABLE listing_fts USING fts5(
+    title_en,
+    brand_en,
+    content='listings',
     content_rowid='id',
     tokenize='unicode61 remove_diacritics 2'
 );
-CREATE TRIGGER products_ai AFTER INSERT ON products BEGIN
-    INSERT INTO product_fts(rowid, title) VALUES (new.id, new.title);
+CREATE TRIGGER listings_ai AFTER INSERT ON listings BEGIN
+    INSERT INTO listing_fts(rowid, title_en, brand_en) VALUES (new.id, new.title_en, new.brand_en);
 END;
-CREATE TRIGGER products_ad AFTER DELETE ON products BEGIN
-    INSERT INTO product_fts(product_fts, rowid, title)
-    VALUES ('delete', old.id, old.title);
+CREATE TRIGGER listings_ad AFTER DELETE ON listings BEGIN
+    INSERT INTO listing_fts(listing_fts, rowid, title_en, brand_en)
+    VALUES ('delete', old.id, old.title_en, old.brand_en);
 END;
-CREATE TRIGGER products_au AFTER UPDATE OF title ON products BEGIN
-    INSERT INTO product_fts(product_fts, rowid, title)
-    VALUES ('delete', old.id, old.title);
-    INSERT INTO product_fts(rowid, title) VALUES (new.id, new.title);
+CREATE TRIGGER listings_au AFTER UPDATE OF title_en, brand_en ON listings BEGIN
+    INSERT INTO listing_fts(listing_fts, rowid, title_en, brand_en)
+    VALUES ('delete', old.id, old.title_en, old.brand_en);
+    INSERT INTO listing_fts(rowid, title_en, brand_en)
+    VALUES (new.id, new.title_en, new.brand_en);
 END;
 """
 
+TEXT_VALUES_SCHEMA = """
+CREATE TABLE listing_text_values (
+    id          INTEGER PRIMARY KEY,
+    listing_id  INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    item_id     TEXT NOT NULL,
+    attribute   TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    language    TEXT
+);
+CREATE INDEX idx_text_values_listing ON listing_text_values(listing_id);
+CREATE INDEX idx_text_values_item ON listing_text_values(item_id);
+CREATE INDEX idx_text_values_attr ON listing_text_values(attribute, value);
+"""
+
+DIMENSIONS_SCHEMA = """
+CREATE TABLE listing_dimensions (
+    id              INTEGER PRIMARY KEY,
+    listing_id      INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    item_id         TEXT NOT NULL,
+    dimension       TEXT NOT NULL CHECK (dimension IN ('height','width','length','weight')),
+    value           REAL NOT NULL CHECK (value >= 0),
+    unit            TEXT NOT NULL,
+    is_normalized   INTEGER NOT NULL CHECK (is_normalized IN (0, 1))
+);
+CREATE INDEX idx_dimensions_listing ON listing_dimensions(listing_id);
+CREATE INDEX idx_dimensions_item ON listing_dimensions(item_id);
+CREATE INDEX idx_dimensions_key ON listing_dimensions(dimension, value);
+"""
+
+
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
-
-def create_schema(conn: sqlite3.Connection, *, rebuild_fts: bool = False) -> None:
-    """Create the normalized catalog schema on an empty connection."""
-    conn.executescript(BASE_SCHEMA)
-    conn.executescript(INDEX_SCHEMA)
-    conn.executescript(FTS_SCHEMA)
-    if rebuild_fts:
-        conn.execute("INSERT INTO product_fts(product_fts) VALUES ('rebuild')")
-    conn.commit()
+# Conversion factors to canonical units (centimeters for length, grams for weight).
+_LENGTH_TO_CM = {
+    "cm": 1.0, "centimeter": 1.0, "centimeters": 1.0,
+    "mm": 0.1, "millimeter": 0.1, "millimeters": 0.1,
+    "m": 100.0, "meter": 100.0, "meters": 100.0,
+    "in": 2.54, "inch": 2.54, "inches": 2.54,
+    "ft": 30.48, "foot": 30.48, "feet": 30.48,
+}
+_WEIGHT_TO_G = {
+    "g": 1.0, "gram": 1.0, "grams": 1.0,
+    "kg": 1000.0, "kilogram": 1000.0, "kilograms": 1000.0,
+    "oz": 28.3495, "ounce": 28.3495, "ounces": 28.3495,
+    "lb": 453.592, "lbs": 453.592, "pound": 453.592, "pounds": 453.592,
+}
 
 
 def _fts_expression(query: str) -> str:
@@ -78,8 +111,48 @@ def _fts_expression(query: str) -> str:
     return " AND ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
 
 
-class ProductCatalogRepository:
-    """Read-only catalog queries used by the research agent tools."""
+def _best_text(values):
+    """Return (text, language) from an ABO [{language_tag, value, ...}] array."""
+    if not values:
+        return None, None
+    en = next((v for v in values if ENGLISH_LANG_RE.match(v.get("language_tag", ""))), None)
+    if en is not None:
+        return en.get("value"), en.get("language_tag")
+    first = values[0]
+    return first.get("value"), first.get("language_tag")
+
+
+def _first_text(values):
+    if not values:
+        return None
+    return values[0].get("value")
+
+
+def _dimension_value(d):
+    """Return (value, unit, is_normalized) from an item_dimensions sub-dict."""
+    if not isinstance(d, dict):
+        return None
+    if d.get("normalized_value"):
+        nv = d["normalized_value"]
+        return (nv.get("value"), nv.get("unit"), 1)
+    if d.get("value") is not None:
+        return (d.get("value"), d.get("unit"), 0)
+    return None
+
+
+def create_schema(conn: sqlite3.Connection, *, rebuild_fts: bool = False) -> None:
+    conn.executescript(BASE_SCHEMA)
+    conn.executescript(INDEX_SCHEMA)
+    conn.executescript(FTS_SCHEMA)
+    conn.executescript(TEXT_VALUES_SCHEMA)
+    conn.executescript(DIMENSIONS_SCHEMA)
+    if rebuild_fts:
+        conn.execute("INSERT INTO listing_fts(listing_fts) VALUES ('rebuild')")
+    conn.commit()
+
+
+class ABOCatalogRepository:
+    """Read-only catalog queries over the imported ABO listings."""
 
     def __init__(self, db_path: str | Path, *, read_only: bool = True) -> None:
         path = Path(db_path).expanduser().resolve()
@@ -97,25 +170,23 @@ class ProductCatalogRepository:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
 
-    def find_categories(self, query: str, limit: int = 10) -> list[dict[str, object]]:
-        """Find category IDs by case-insensitive name fragment."""
+    def find_product_types(self, query: str, limit: int = 10) -> list[dict[str, object]]:
+        """Return product_type buckets ordered by listing count."""
         limit = max(1, min(limit, 50))
         pattern = f"%{query.strip().lower()}%"
         rows = self._conn.execute(
             """
-            SELECT c.id, c.name, COUNT(p.id) AS product_count
-            FROM categories AS c
-            LEFT JOIN products AS p ON p.category_id = c.id
-            WHERE LOWER(c.name) LIKE ?
-            GROUP BY c.id, c.name
-            ORDER BY product_count DESC, c.name
+            SELECT product_type, COUNT(*) AS product_count
+            FROM listings
+            WHERE LOWER(IFNULL(product_type, '')) LIKE ?
+            GROUP BY product_type
+            ORDER BY product_count DESC, product_type
             LIMIT ?
             """,
             (pattern, limit),
         ).fetchall()
         return [
-            {"category_id": row["id"], "category_name": row["name"],
-             "product_count": row["product_count"]}
+            {"product_type": row["product_type"], "product_count": row["product_count"]}
             for row in rows
         ]
 
@@ -123,63 +194,55 @@ class ProductCatalogRepository:
         self,
         query: str,
         *,
-        category_id: int = 0,
-        max_price: float = 0,
-        min_stars: float = 0,
-        bestseller_only: bool = False,
+        product_type: str = "",
+        max_dimension_cm: float = 0.0,
         limit: int = 10,
-    ) -> list[CatalogProduct]:
-        """Search titles, then apply exact structured catalog filters."""
+    ) -> list[dict]:
+        """Return BM25-ranked listings with structured evidence."""
         limit = max(1, min(limit, 50))
         expression = _fts_expression(query)
+        where = ["l.title_en <> ''"]
         params: list[object] = []
-        where = ["p.price > 0"]
 
         if expression:
             from_sql = """
                 FROM (
-                    SELECT rowid, bm25(product_fts) AS text_rank
-                    FROM product_fts
-                    WHERE product_fts MATCH ?
+                    SELECT rowid, bm25(listing_fts) AS text_rank
+                    FROM listing_fts
+                    WHERE listing_fts MATCH ?
                     LIMIT 10000
                 ) AS matches
-                JOIN products AS p ON p.id = matches.rowid
-                JOIN categories AS c ON c.id = p.category_id
+                JOIN listings AS l ON l.id = matches.rowid
             """
             params.append(expression)
-            order_sql = (
-                "ORDER BY matches.text_rank, p.is_best_seller DESC, "
-                "p.stars DESC, p.bought_last_month DESC"
-            )
+            order_sql = "ORDER BY matches.text_rank, l.id"
         else:
-            from_sql = """
-                FROM products AS p
-                JOIN categories AS c ON c.id = p.category_id
-            """
-            order_sql = (
-                "ORDER BY p.is_best_seller DESC, p.stars DESC, "
-                "p.bought_last_month DESC, p.review_count DESC"
-            )
+            from_sql = "FROM listings AS l"
+            order_sql = "ORDER BY l.id"
 
-        if category_id > 0:
-            where.append("p.category_id = ?")
-            params.append(category_id)
-        if max_price > 0:
-            where.append("p.price <= ?")
-            params.append(max_price)
-        if min_stars > 0:
-            where.append("p.stars >= ?")
-            params.append(min_stars)
-        if bestseller_only:
-            where.append("p.is_best_seller = 1")
+        if product_type:
+            where.append("l.product_type = ?")
+            params.append(product_type)
+
+        if max_dimension_cm > 0:
+            where.append(
+                """EXISTS (
+                    SELECT 1 FROM listing_dimensions d
+                    WHERE d.item_id = l.item_id
+                      AND d.dimension = 'length'
+                      AND d.value <= ?
+                      AND d.unit = 'cm'
+                )"""
+            )
+            params.append(max_dimension_cm)
 
         params.append(limit)
         rows = self._conn.execute(
             f"""
-            SELECT p.id, p.asin, p.title, p.image_url, p.product_url,
-                   p.stars, p.review_count, p.price, p.list_price,
-                   p.category_id, c.name AS category_name,
-                   p.is_best_seller, p.bought_last_month
+            SELECT l.item_id, l.marketplace, l.country, l.product_type,
+                   l.title_en, l.brand_en, l.main_image_id,
+                   l.has_bullet, l.has_dimensions, l.has_weight, l.has_material,
+                   l.product_url
             {from_sql}
             WHERE {' AND '.join(where)}
             {order_sql}
@@ -187,51 +250,86 @@ class ProductCatalogRepository:
             """,
             params,
         ).fetchall()
-        return [self._row_to_product(row) for row in rows]
+        return [self._row_to_dict(row) for row in rows]
 
-    def get_by_asin(self, asin: str) -> CatalogProduct | None:
-        """Return one product by its stable Amazon identifier."""
-        row = self._conn.execute(
-            """
-            SELECT p.id, p.asin, p.title, p.image_url, p.product_url,
-                   p.stars, p.review_count, p.price, p.list_price,
-                   p.category_id, c.name AS category_name,
-                   p.is_best_seller, p.bought_last_month
-            FROM products AS p
-            JOIN categories AS c ON c.id = p.category_id
-            WHERE p.asin = ?
-            """,
-            (asin,),
-        ).fetchone()
-        return self._row_to_product(row) if row else None
+    def get_text_values(self, item_id: str) -> list[dict[str, str]]:
+        rows = self._conn.execute(
+            "SELECT attribute, value, language FROM listing_text_values "
+            "WHERE item_id = ? ORDER BY attribute, id",
+            (item_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_dimensions(self, item_id: str) -> list[dict[str, object]]:
+        rows = self._conn.execute(
+            "SELECT dimension, value, unit, is_normalized FROM listing_dimensions "
+            "WHERE item_id = ? ORDER BY dimension",
+            (item_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def stats(self) -> dict[str, int]:
-        """Return compact catalog counts for boot diagnostics."""
         row = self._conn.execute(
             """
-            SELECT (SELECT COUNT(*) FROM products) AS products,
-                   (SELECT COUNT(*) FROM categories) AS categories
+            SELECT
+                (SELECT COUNT(*) FROM listings) AS listings,
+                (SELECT COUNT(DISTINCT product_type) FROM listings) AS product_types,
+                (SELECT COUNT(*) FROM listing_dimensions) AS dimensions,
+                (SELECT COUNT(*) FROM listing_text_values) AS text_values
             """
         ).fetchone()
-        return {"products": row["products"], "categories": row["categories"]}
+        return dict(row)
 
     @staticmethod
-    def _row_to_product(row: sqlite3.Row) -> CatalogProduct:
-        return CatalogProduct(
-            id=row["id"],
-            asin=row["asin"],
-            title=row["title"],
-            image_url=row["image_url"],
-            product_url=row["product_url"],
-            stars=float(row["stars"]),
-            review_count=row["review_count"],
-            price=float(row["price"]),
-            list_price=float(row["list_price"]),
-            category_id=row["category_id"],
-            category_name=row["category_name"],
-            is_best_seller=bool(row["is_best_seller"]),
-            bought_last_month=row["bought_last_month"],
-        )
+    def _row_to_dict(row: sqlite3.Row) -> dict:
+        return dict(row)
 
     def close(self) -> None:
         self._conn.close()
+
+
+# ----- Import helpers ------------------------------------------------------
+
+def _extract_dimensions(item_dimensions, item_weight):
+    """Return a list of (dimension, value, unit, is_normalized) records."""
+    out = []
+    for key, raw in (("length", item_dimensions.get("length") if item_dimensions else None),
+                     ("width", item_dimensions.get("width") if item_dimensions else None),
+                     ("height", item_dimensions.get("height") if item_dimensions else None)):
+        rec = _dimension_value(raw)
+        if rec is not None and rec[0] is not None:
+            out.append((key, float(rec[0]), str(rec[1] or ""), int(rec[2])))
+    if item_weight:
+        if isinstance(item_weight, list):
+            for entry in item_weight:
+                rec = _dimension_value(entry)
+                if rec is not None and rec[0] is not None:
+                    out.append(("weight", float(rec[0]), str(rec[1] or ""), int(rec[2])))
+                    break
+        elif isinstance(item_weight, dict):
+            rec = _dimension_value(item_weight)
+            if rec is not None and rec[0] is not None:
+                out.append(("weight", float(rec[0]), str(rec[1] or ""), int(rec[2])))
+    return out
+
+
+def normalize_dimension_value(dimension: str, value: float, unit: str) -> float:
+    """Convert a typed dimension to its canonical unit (cm or grams)."""
+    if dimension == "weight":
+        factor = _WEIGHT_TO_G.get(unit.lower())
+    else:
+        factor = _LENGTH_TO_CM.get(unit.lower())
+    if factor is None or value is None:
+        return value
+    return value * factor
+
+
+def unit_to_canonical(dimension: str) -> str:
+    return "g" if dimension == "weight" else "cm"
+
+
+def closest_dimension_match(query_value: float, candidates: list[tuple[float, str]]) -> tuple[float, str] | None:
+    """Return the candidate with the smallest absolute delta to query_value."""
+    if not candidates:
+        return None
+    return min(candidates, key=lambda c: abs(c[0] - query_value))
