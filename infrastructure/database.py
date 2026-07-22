@@ -1,7 +1,6 @@
 """Indexed SQLite catalog over the Amazon Berkeley Objects metadata archive."""
 from __future__ import annotations
 
-import math
 import re
 import sqlite3
 from pathlib import Path

@@ -12,34 +12,28 @@ cd data/abo && tar xzf abo-listings.tar.gz && cd ../..
 uv run python scripts/import_catalog.py --shards data/abo/listings/
 ```
 
-The importer reads gzipped NDJSON shards (16 files, ~147K listings), builds
-text-values and dimension tables alongside the main `listings` table, creates an
-FTS5 index, and runs integrity checks. Add `--limit 50000` for a quick subset.
+The importer reads gzipped NDJSON shards, builds the listing, structured text-value, dimension, and FTS5 tables, and runs integrity checks. Add `--limit 50000` for a smaller catalog.
 
 ## AMD Developer Cloud
 
-Use one MI300X GPU Droplet with the vLLM 1-Click image. The available credit
-covers GPU usage only; set a hard spending cap before creating the droplet and
-destroy it after each session.
+Use one MI300X GPU Droplet with the vLLM 1-Click image. The available credit covers GPU usage only; set a hard spending cap before creating the droplet and destroy it after each session.
 
-1. Create a cloud firewall allowing SSH and port 8000 only from your current
-   public IP.
+1. Create a cloud firewall allowing SSH and port 8000 only from your public IP.
 2. Create the MI300X droplet and add your SSH key.
-3. SSH in and verify the GPU and vLLM container:
+3. Verify the GPU and vLLM container:
 
 ```bash
 amd-smi --showproductname --showuse --showmeminfo vram
 docker ps
 ```
 
-4. Start vLLM with the project launcher:
+4. Start vLLM:
 
 ```bash
 ./scripts/serve-vllm-rocm.sh
 ```
 
-5. Run the catalog and agents on the laptop, pointing only inference at the
-   droplet:
+5. Run the catalog and agent on the laptop, pointing inference at the droplet:
 
 ```bash
 RETAIL_PROVIDER=vllm \
@@ -60,7 +54,7 @@ RETAIL_MODEL=google/gemma-3-27b-it \
 
 ## Local development
 
-DeepSeek uses the same MAF client shape and avoids GPU credit usage:
+DeepSeek uses the same MAF Chat Completions client:
 
 ```bash
 RETAIL_PROVIDER=deepseek \
@@ -71,15 +65,10 @@ DEEPSEEK_API_KEY=*** \
 
 ## Demo constraints
 
-- The catalog is offline, deterministic, and contains no prices, ratings,
-  review counts, or popularity signals.
-- The application does not claim live availability, current pricing, shipping,
-  or specifications absent from the catalog.
-- The application does not add items to a cart or make purchases.
-- Only vLLM inference requires network access during the judge demo.
-- Discovery asks only when ambiguity blocks a valid search; otherwise it shows
-  products with explicit assumptions and contextual refinement chips. Selecting
-  a chip reruns the read-only recommendation flow.
-- SQLite FTS5 retrieves candidates; Research excludes accessories and uncertain
-  product types before deterministic ranking. No vector database or Qdrant
-  service is required.
+- One MAF agent owns the conversation and reuses one `AgentSession`.
+- All tools are read-only; the application cannot add items to a cart or purchase them.
+- SQLite FTS5 retrieves candidates; the agent classifies product identity before deterministic application-owned ranking.
+- `CatalogEvidenceTracker` enforces catalog provenance: the `finalize_recommendations` tool drops any candidate whose `item_id` was not returned by `search_catalog` in the current session.
+- Non-exact products and unknown IDs cannot enter the displayed recommendation set.
+- The offline catalog has no prices, ratings, reviews, popularity, or live availability.
+- Only inference requires network access during the demo.

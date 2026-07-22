@@ -1,0 +1,238 @@
+"""Single conversational shopping agent with deterministic catalog safeguards."""
+from __future__ import annotations
+
+import json
+import threading
+from collections import OrderedDict
+from typing import Any
+
+from agent_framework import Agent, tool
+from agent_framework.openai import OpenAIChatCompletionClient
+
+from use_cases.ranking import screen_and_rank_candidates
+
+FINALIZE_RECOMMENDATIONS_TOOL = "finalize_recommendations"
+
+SHOPPING_AGENT_INSTRUCTIONS = """\
+You are RetailConcierge, one conversational shopping agent. You clarify the
+user's request when necessary, search the offline Amazon Berkeley Objects (ABO)
+catalog with the tools, screen product identity, and present evidence-backed
+recommendations.
+
+Conversation:
+- Keep the entire conversation in the supplied AgentSession.
+- Ask one concise clarification only when proceeding could select the wrong
+  product type, compatibility is unknown, explicit constraints conflict, or a
+  must-have would otherwise be silently relaxed.
+- Missing budget, brand, color, or a nice-to-have is not blocking. Proceed with
+  a clearly stated assumption when useful results are possible.
+- Treat a user's next message as the answer or refinement to the current request.
+
+Catalog workflow:
+1. Call find_product_types only when an exact catalog product_type will
+   materially narrow retrieval.
+2. Call search_catalog with concrete title terms and limit=50. Broaden the title
+   terms once if too few useful candidates are returned.
+3. Pass through every candidate returned by search_catalog. Do not invent items.
+   Each candidate must include its item_id, retrieval_rank, and the catalog
+   flags (has_bullet, has_dimensions, has_weight, has_material) you received.
+4. Classify each item as exactly one of: exact_product, accessory, unrelated,
+   uncertain. Product identity is an eligibility decision, not a preference.
+   Covers, mats, pillows, replacement parts, and add-ons are not the requested
+   primary product.
+5. Call finalize_recommendations exactly once with the full classified list.
+   Application code removes ineligible products and applies deterministic
+   ranking. Only the candidates and exact order returned by the finalizer are
+   shown to the user.
+6. Use only the candidates and exact order returned by finalize_recommendations.
+   You may omit a candidate that contradicts an explicit must-have, but never
+   restore an excluded item, add an unknown item, or reorder the result.
+
+Final response:
+- For a clarification, respond with only the natural-language question. Do not
+  call finalize_recommendations first.
+- For recommendations, return exactly one JSON object and no surrounding prose:
+{
+  "kind": "recommendations",
+  "ranked": [
+    {
+      "rank": 1,
+      "item_id": "...",
+      "title_en": "...",
+      "brand_en": "...",
+      "product_type": "...",
+      "product_url": "...",
+      "why_it_fits": ["catalog-backed reason"],
+      "trade_offs": ["specific limitation or unknown"]
+    }
+  ],
+  "assumptions": ["assumption used to proceed"],
+  "notes": ["screening or evidence limitation"],
+  "recommendation": "one concise action",
+  "refinement_chips": [
+    {"label": "short option", "instruction": "self-contained refinement"}
+  ],
+  "dataset_notice": "This is an offline product catalog snapshot with typed dimensions, material, color, and brand metadata but no prices, ratings, or live availability."
+}
+Return at most five ranked products and four contextual refinement chips. Never
+invent specifications, prices, ratings, availability, shipping, or warranties.
+"""
+
+
+class CatalogEvidenceTracker:
+    """Track item_ids observed by catalog tools for one shopping session."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seen: OrderedDict[str, None] = OrderedDict()
+
+    def record(self, item_ids: list[str]) -> None:
+        with self._lock:
+            for item_id in item_ids:
+                self._seen.setdefault(item_id, None)
+
+    def snapshot(self) -> set[str]:
+        with self._lock:
+            return set(self._seen)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._seen.clear()
+
+
+def build_shopping_agent(
+    client: OpenAIChatCompletionClient,
+    catalog_tools: list[Any],
+    *,
+    tracker: CatalogEvidenceTracker | None = None,
+) -> Agent:
+    """Build the one MAF agent used for every turn in a shopping session."""
+    tracker = tracker or CatalogEvidenceTracker()
+    finalize = _make_finalize_tool(tracker)
+    return Agent(
+        client=client,
+        instructions=SHOPPING_AGENT_INSTRUCTIONS,
+        tools=[*catalog_tools, finalize],
+    )
+
+
+def build_finalize_recommendations_tool():
+    """Build the deterministic finalization tool and its bound tracker."""
+    tracker = CatalogEvidenceTracker()
+    return _make_finalize_tool(tracker), tracker
+
+
+def _make_finalize_tool(tracker: CatalogEvidenceTracker):
+    @tool(
+        name=FINALIZE_RECOMMENDATIONS_TOOL,
+        description=(
+            "Remove candidates that are not exact requested products and apply the "
+            "catalog's deterministic ranking. Candidates must originate from "
+            "search_catalog in this session. Returns the authoritative candidate order."
+        ),
+    )
+    def finalize_recommendations(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        """Screen product identity and deterministically rank exact products."""
+        return screen_and_rank_candidates(
+            {"candidates": candidates},
+            allowed_item_ids=tracker.snapshot(),
+        )
+
+    finalize_recommendations._catalog_tracker = tracker  # type: ignore[attr-defined]
+    return finalize_recommendations
+
+
+def enforce_finalized_recommendation(
+    recommendation: dict[str, Any], finalized: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """Drop unknown products and restore deterministic candidate order and facts."""
+    if finalized is None:
+        raise ValueError(
+            "Shopping agent returned recommendations without finalizing candidates"
+        )
+    by_id = {
+        candidate.get("item_id"): candidate
+        for candidate in finalized
+        if candidate.get("item_id")
+    }
+    agent_ranked = recommendation.get("ranked", [])
+    if not isinstance(agent_ranked, list):
+        raise ValueError("Shopping agent recommendation needs a ranked array")
+    agent_by_id = {
+        item.get("item_id"): item
+        for item in agent_ranked
+        if isinstance(item, dict) and item.get("item_id") in by_id
+    }
+    ranked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in finalized:
+        item_id = candidate.get("item_id")
+        if item_id not in agent_by_id or item_id in seen:
+            continue
+        rendered = dict(candidate)
+        generated = agent_by_id[item_id]
+        rendered["why_it_fits"] = generated.get("why_it_fits", [])
+        rendered["trade_offs"] = generated.get("trade_offs", [])
+        ranked.append(rendered)
+        seen.add(item_id)
+        if len(ranked) == 5:
+            break
+    for position, item in enumerate(ranked, start=1):
+        item["rank"] = position
+    normalized = dict(recommendation)
+    normalized["ranked"] = ranked
+    return normalized
+
+
+def finalized_candidates_from_response(response: Any) -> list[dict[str, Any]] | None:
+    """Read the latest deterministic finalizer result from a MAF response."""
+    call_names: dict[str, str] = {}
+    latest: list[dict[str, Any]] | None = None
+    for message in getattr(response, "messages", []):
+        for content in getattr(message, "contents", []):
+            content_type = getattr(content, "type", None)
+            if content_type == "function_call":
+                call_id = getattr(content, "call_id", None)
+                name = getattr(content, "name", None)
+                if call_id and name:
+                    call_names[call_id] = name
+                continue
+            if content_type != "function_result":
+                continue
+            call = getattr(content, "function_call", None)
+            name = getattr(call, "name", None) or call_names.get(
+                getattr(content, "call_id", "")
+            )
+            if name != FINALIZE_RECOMMENDATIONS_TOOL:
+                continue
+            result = getattr(content, "result", None)
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            if isinstance(result, dict) and isinstance(result.get("candidates"), list):
+                latest = result["candidates"]
+    return latest
+
+
+def parse_recommendation(text: str) -> dict[str, Any]:
+    """Parse and validate a recommendation response from the shopping agent."""
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    try:
+        value = json.loads(candidate)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("Shopping agent returned an invalid recommendation") from exc
+    if not isinstance(value, dict) or value.get("kind") != "recommendations":
+        raise ValueError("Shopping agent response is not a recommendation object")
+    if not isinstance(value.get("ranked"), list):
+        raise ValueError("Shopping agent recommendation needs a ranked array")
+    if not isinstance(value.get("refinement_chips", []), list):
+        raise ValueError("Shopping agent refinement_chips must be an array")
+    return value

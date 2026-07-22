@@ -53,7 +53,12 @@ def _brand_score(candidate: dict) -> float:
     return 1.0 if brand and brand.strip() else 0.0
 
 
-def screen_and_rank_candidates(research: dict, limit: int = MAX_RANKED_CANDIDATES) -> dict:
+def screen_and_rank_candidates(
+    research: dict,
+    *,
+    allowed_item_ids: set[str] | None = None,
+    limit: int = MAX_RANKED_CANDIDATES,
+) -> dict:
     """Keep LLM-classified exact products and rerank catalog evidence.
 
     Signals (from highest weight):
@@ -62,19 +67,34 @@ def screen_and_rank_candidates(research: dict, limit: int = MAX_RANKED_CANDIDATE
       - Material presence → dimension-heuristic category (furniture, decor)
       - Brand presence → name-brand confidence
       - Dimension records → weight for dimension-constrained queries
+
+    When ``allowed_item_ids`` is provided, only candidates whose ``item_id`` is
+    in the set survive; unknown or invented IDs are dropped. When the set is
+    ``None`` the catalog-evidence guarantee is not available and the function
+    falls back to trusting the input.
     """
     raw_candidates = research.get("candidates", [])
     if not isinstance(raw_candidates, list):
-        raise ValueError("Research candidates must be an array")
+        raise ValueError("Shopping candidates must be an array")
 
     classifications = Counter()
     eligible: list[dict] = []
+    seen_ids: set[str] = set()
     for index, raw in enumerate(raw_candidates, start=1):
         if not isinstance(raw, dict):
-            raise ValueError("Each research candidate must be an object")
+            raise ValueError("Each shopping candidate must be an object")
+        item_id = raw.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            raise ValueError("Each shopping candidate needs a non-empty item_id")
+        if allowed_item_ids is not None and item_id not in allowed_item_ids:
+            classifications["unknown_to_catalog"] += 1
+            continue
+        if item_id in seen_ids:
+            classifications["duplicate"] += 1
+            continue
         classification = raw.get("product_type_match")
         if not isinstance(classification, str):
-            raise ValueError("Each research candidate needs product_type_match")
+            raise ValueError("Each shopping candidate needs product_type_match")
         classifications[classification] += 1
         if classification != ELIGIBLE_PRODUCT_TYPE:
             continue
@@ -83,6 +103,7 @@ def screen_and_rank_candidates(research: dict, limit: int = MAX_RANKED_CANDIDATE
             candidate.get("retrieval_rank"), index
         )
         eligible.append(candidate)
+        seen_ids.add(item_id)
 
     for candidate in eligible:
         retrieval_rank = candidate["retrieval_rank"]
@@ -120,19 +141,22 @@ def screen_and_rank_candidates(research: dict, limit: int = MAX_RANKED_CANDIDATE
 
     normalized = dict(research)
     normalized["candidates"] = ranked
+    normalized["eligible_item_ids"] = [candidate.get("item_id") for candidate in ranked]
     summary = research.get("screening_summary", {})
     normalized["screening_summary"] = {
         **(summary if isinstance(summary, dict) else {}),
         "returned_for_ranking": len(raw_candidates),
         "eligible_exact_products": len(eligible),
         "excluded_from_ranking": len(raw_candidates) - len(eligible),
-        "returned_to_critic": len(ranked),
+        "returned_to_agent": len(ranked),
         "returned_classifications": dict(sorted(classifications.items())),
     }
     return normalized
 
 
-def enforce_recommendation_order(recommendation: dict, research: dict) -> dict:
+def enforce_recommendation_order(
+    recommendation: dict, research: dict
+) -> dict:
     """Drop unknown products and preserve deterministic eligible-product order."""
     candidates = research.get("candidates", [])
     order = {
@@ -142,12 +166,19 @@ def enforce_recommendation_order(recommendation: dict, research: dict) -> dict:
     }
     raw_ranked = recommendation.get("ranked", [])
     if not isinstance(raw_ranked, list):
-        raise ValueError("Critic ranked must be an array")
-    ranked = [
-        dict(item)
-        for item in raw_ranked
-        if isinstance(item, dict) and item.get("item_id") in order
-    ]
+        raise ValueError("Recommendation ranked must be an array")
+    seen: set[str] = set()
+    ranked: list[dict] = []
+    for item in raw_ranked:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+        if item_id not in order or item_id in seen:
+            continue
+        ranked.append(dict(item))
+        seen.add(item_id)
     ranked.sort(key=lambda item: order[item["item_id"]])
     for position, item in enumerate(ranked, start=1):
         item["rank"] = position

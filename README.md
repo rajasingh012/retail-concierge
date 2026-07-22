@@ -1,8 +1,10 @@
 # RetailConcierge
 
-Three collaborating agents built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. SQLite FTS5 retrieves candidates from the **Amazon Berkeley Objects** offline catalog (145K products, 576 product types). The Research agent excludes accessories and uncertain product types, deterministic catalog-signal ranking orders eligible products, and the Critic reviews with evidence-backed trade-offs.
+One conversational retail agent built with Microsoft Agent Framework and served by vLLM on an AMD MI300X. The agent keeps a multi-turn `AgentSession`, asks only blocking clarification questions, and uses schema-aware tools over an offline Amazon Berkeley Objects catalog.
 
-The system never claims current prices, availability, shipping, or specifications absent from the catalog, and does not add items to a cart or make purchases.
+SQLite FTS5 retrieves candidates from 145K products across 576 product types. The agent classifies exact products versus accessories and unrelated items; application code enforces that eligibility decision and deterministically ranks the remaining catalog evidence.
+
+The system never claims current prices, availability, shipping, ratings, or specifications absent from the catalog, and it does not add items to a cart or make purchases.
 
 ## Quick start
 
@@ -27,4 +29,6 @@ RETAIL_PROVIDER=deepseek RETAIL_MODEL=deepseek-chat uv run python main.py
 
 ## Documentation
 
-- [progress.md](progress.md) — forward-looking work only
+- [architecture.md](architecture.md) — current design and data flow
+- [deploy.md](deploy.md) — catalog, inference, and benchmark commands
+- [progress.md](progress.md) — forward-looking work

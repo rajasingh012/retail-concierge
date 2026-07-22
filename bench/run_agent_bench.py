@@ -1,4 +1,4 @@
-"""Benchmark the Discovery → Research → Critic agent collaboration (ABO catalog)."""
+"""Benchmark the single conversational RetailConcierge agent."""
 from __future__ import annotations
 
 import argparse
@@ -17,11 +17,17 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from infrastructure.agent_tools import build_tools, cache_stats, clear_cache
+from infrastructure.agent_tools import build_tools as build_catalog_tools
+from infrastructure.agent_tools import cache_stats, clear_cache
 from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ABOCatalogRepository
-from use_cases import build_critic_agent, build_discovery_agent, build_research_agent
-from use_cases.collaboration import run_collaboration
+from use_cases import build_shopping_agent
+from use_cases.shopping_agent import (
+    CatalogEvidenceTracker,
+    enforce_finalized_recommendation,
+    finalized_candidates_from_response,
+    parse_recommendation,
+)
 
 SAMPLE_SCENARIOS = [
     "I need a lightweight carry-on spinner luggage with four wheels.",
@@ -32,10 +38,6 @@ SAMPLE_SCENARIOS = [
 ]
 
 
-async def _bench_clarification_answer(_: str) -> str:
-    return "Use reasonable defaults and continue with the available constraints."
-
-
 def _gpu_snapshot() -> dict[str, Any]:
     for command in (["amd-smi", "metric", "--json"], ["rocm-smi", "--json"]):
         if not shutil.which(command[0]):
@@ -43,7 +45,11 @@ def _gpu_snapshot() -> dict[str, Any]:
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=8)
             if result.returncode == 0:
-                return {"available": True, "source": command[0], "raw": result.stdout[:8000]}
+                return {
+                    "available": True,
+                    "source": command[0],
+                    "raw": result.stdout[:8000],
+                }
         except Exception as exc:
             return {"available": False, "error": str(exc)}
     return {"available": False}
@@ -54,11 +60,15 @@ def _vllm_metrics(url: str) -> dict[str, Any]:
         with urllib.request.urlopen(url, timeout=3) as response:
             lines = response.read().decode("utf-8").splitlines()
         prefixes = (
-            "vllm:prefix_cache", "vllm:gpu_cache_usage",
-            "vllm:num_requests_running", "vllm:time_to_first_token",
+            "vllm:prefix_cache",
+            "vllm:gpu_cache_usage",
+            "vllm:num_requests_running",
+            "vllm:time_to_first_token",
         )
-        selected = [line for line in lines if line.startswith(prefixes)]
-        return {"available": True, "metrics": selected}
+        return {
+            "available": True,
+            "metrics": [line for line in lines if line.startswith(prefixes)],
+        }
     except Exception as exc:
         return {"available": False, "error": str(exc)}
 
@@ -67,10 +77,10 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     repository = ABOCatalogRepository(args.database)
     stats = repository.stats()
     client = build_chat_client(args.provider, args.model)
-    tools = build_tools(repository)
-    discovery = build_discovery_agent(client)
-    research = build_research_agent(client, tools)
-    critic = build_critic_agent(client)
+    tracker = CatalogEvidenceTracker()
+    agent = build_shopping_agent(
+        client, build_catalog_tools(repository, catalog_tracker=tracker), tracker=tracker
+    )
     scenarios = SAMPLE_SCENARIOS[: max(1, min(args.turns, len(SAMPLE_SCENARIOS)))]
     metrics_url = os.getenv("VLLM_METRICS_URL", "http://localhost:8000/metrics")
 
@@ -82,30 +92,44 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         for index, scenario in enumerate(scenarios, start=1):
             before = cache_stats()
             started = time.perf_counter()
-            result = await run_collaboration(
-                discovery, research, critic, scenario, _bench_clarification_answer
-            )
+            tracker.reset()
+            response = await agent.run(scenario, session=agent.create_session())
             elapsed = time.perf_counter() - started
+            text = getattr(response, "text", None) or str(response)
             after = cache_stats()
-            screening = result.research.get("screening_summary", {})
+            response_kind = "error"
+            recommendations = 0
+            refinements = 0
+            try:
+                parsed = parse_recommendation(text)
+            except ValueError:
+                response_kind = "clarification"
+            else:
+                try:
+                    recommendation = enforce_finalized_recommendation(
+                        parsed,
+                        finalized_candidates_from_response(response),
+                    )
+                except ValueError as exc:
+                    print(f"[bench] scenario {index} finalize error: {exc}")
+                else:
+                    response_kind = "recommendations"
+                    recommendations = len(recommendation.get("ranked", []))
+                    refinements = len(recommendation.get("refinement_chips", []))
             row = {
                 "scenario": index,
                 "request": scenario,
                 "latency_sec": round(elapsed, 3),
-                "clarifications_requested": result.clarifications_requested,
-                "refinement_chips": len(result.refinement_chips),
-                "exact_products": screening.get("eligible_exact_products", 0),
-                "excluded_by_product_type": screening.get("excluded_from_ranking", 0),
-                "candidates_researched": len(result.research.get("candidates", [])),
-                "recommendations": len(result.recommendation.get("ranked", [])),
+                "response_kind": response_kind,
+                "recommendations": recommendations,
+                "refinement_chips": refinements,
                 "cache_hits_delta": after["hits"] - before["hits"],
                 "cache_misses_delta": after["misses"] - before["misses"],
             }
             rows.append(row)
             print(
                 f"[bench] {index}/{len(scenarios)} {row['latency_sec']}s; "
-                f"eligible={row['exact_products']} excluded={row['excluded_by_product_type']} "
-                f"ranked={row['recommendations']}"
+                f"kind={response_kind} ranked={recommendations}"
             )
     finally:
         repository.close()

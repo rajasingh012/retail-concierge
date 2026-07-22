@@ -1,14 +1,14 @@
 [project]
 name = "retail-concierge"
 version = "0.1.0"
-description = "Collaborative retail recommendation agents on AMD ROCm"
+description = "Conversational retail recommendation agent on AMD ROCm"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "AGPL-3.0-or-later" }
 authors = [
     { name = "rajasingh012" },
 ]
-keywords = ["multi-agent", "retail", "amd", "rocm", "vllm", "microsoft-agent-framework"]
+keywords = ["conversational-agent", "retail", "amd", "rocm", "vllm", "microsoft-agent-framework"]
 
 dependencies = [
     "agent-framework-core>=1.10.0",

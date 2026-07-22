@@ -1,23 +1,32 @@
-"""Composition root for the offline three-agent retail collaboration (ABO catalog)."""
+"""Composition root for the single-agent offline retail concierge."""
 from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
-from infrastructure.agent_tools import build_tools
+from infrastructure.agent_tools import build_tools as _build_catalog_tools
 from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ABOCatalogRepository
-from use_cases import (
-    build_critic_agent,
-    build_discovery_agent,
-    build_research_agent,
+from use_cases import build_shopping_agent
+from use_cases.shopping_agent import (
+    CatalogEvidenceTracker,
+    enforce_finalized_recommendation,
+    finalized_candidates_from_response,
+    parse_recommendation,
 )
-from use_cases.collaboration import RefinementChip, apply_refinement, run_collaboration
 
 DEFAULT_PROVIDER = "vllm"
 DEFAULT_MODEL = "google/gemma-3-27b-it"
 DEFAULT_DB = Path("./retail_catalog.db")
+MAX_REFINEMENT_CHIPS = 4
+
+
+@dataclass(frozen=True)
+class RefinementChip:
+    label: str
+    instruction: str
 
 
 def resolve_client():
@@ -32,11 +41,6 @@ def resolve_client():
     return build_chat_client(provider, model, **overrides)
 
 
-async def _request_clarification(question: str) -> str:
-    print(f"\n[Clarification] {question}")
-    return await asyncio.to_thread(input, "you> ")
-
-
 def _format_product(product: dict) -> str:
     """Render one evidence-backed recommendation for the terminal."""
     rank = product.get("rank", "-")
@@ -44,15 +48,12 @@ def _format_product(product: dict) -> str:
     brand = product.get("brand_en") or ""
     material = product.get("material") or ""
     color = product.get("color") or ""
-    has_dim = product.get("has_dimensions", 0)
-    dim_note = "| Dimensions recorded" if has_dim else ""
+    dim_note = "| Dimensions recorded" if product.get("has_dimensions", 0) else ""
     brand_text = f"| {brand}" if brand else ""
     attr_text = f"Material: {material}" if material else ""
     color_text = f"Color: {color}" if color else ""
     meta = "  ".join(filter(None, [brand_text, attr_text, color_text, dim_note]))
-    lines = [
-        f"{rank}. {title}",
-    ]
+    lines = [f"{rank}. {title}"]
     if meta:
         lines.append(f"   {meta}")
     for reason in product.get("why_it_fits", []):
@@ -64,9 +65,34 @@ def _format_product(product: dict) -> str:
     return "\n".join(lines)
 
 
-def _show_result(result) -> None:
+def _parse_refinement_chips(recommendation: dict) -> tuple[RefinementChip, ...]:
+    """Validate, deduplicate, and cap user-facing refinements."""
+    raw_chips = recommendation.get("refinement_chips", [])
+    if not isinstance(raw_chips, list):
+        return ()
+    chips: list[RefinementChip] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in raw_chips:
+        if not isinstance(raw, dict):
+            continue
+        label = raw.get("label")
+        instruction = raw.get("instruction")
+        if not isinstance(label, str) or not label.strip():
+            continue
+        if not isinstance(instruction, str) or not instruction.strip():
+            continue
+        key = (label.strip(), instruction.strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        chips.append(RefinementChip(*key))
+        if len(chips) == MAX_REFINEMENT_CHIPS:
+            break
+    return tuple(chips)
+
+
+def _show_recommendation(recommendation: dict) -> tuple[RefinementChip, ...]:
     """Show products first, followed by assumptions and refinement chips."""
-    recommendation = result.recommendation
     ranked = recommendation.get("ranked", [])
     print("\nRecommendations")
     if ranked:
@@ -76,60 +102,50 @@ def _show_result(result) -> None:
 
     if summary := recommendation.get("recommendation"):
         print(f"\n{summary}")
-    assumptions = result.brief.get("assumptions", [])
+    assumptions = recommendation.get("assumptions", [])
     if assumptions:
         print("\nAssumptions:")
         for assumption in assumptions:
             print(f"- {assumption}")
-    notes = recommendation.get("critic_notes", [])
+    notes = recommendation.get("notes", [])
     if notes:
         print("\nEvidence notes:")
         for note in notes:
             print(f"- {note}")
-    screening = result.research.get("screening_summary", {})
-    excluded = screening.get("excluded_from_ranking", 0)
-    if excluded:
-        print(f"\nFiltered {excluded} accessories, unrelated, or uncertain items.")
     if notice := recommendation.get("dataset_notice"):
         print(f"\n{notice}")
-    if result.refinement_chips:
+
+    chips = _parse_refinement_chips(recommendation)
+    if chips:
         print("\nRefine:")
-        print(" ".join(
-            f"[{index}] {chip.label}"
-            for index, chip in enumerate(result.refinement_chips, start=1)
-        ))
-
-
-async def _next_refinement(
-    current_request: str, chips: tuple[RefinementChip, ...]
-) -> str | None:
-    if not chips:
-        return None
-    reply = (
-        await asyncio.to_thread(
-            input, "refine> Choose a number, type your own refinement, or Enter: "
+        print(
+            " ".join(
+                f"[{index}] {chip.label}" for index, chip in enumerate(chips, start=1)
+            )
         )
-    ).strip()
-    if not reply:
-        return None
-    if reply.isdigit():
+    return chips
+
+
+async def _next_message(chips: tuple[RefinementChip, ...]) -> str:
+    prompt = "you> "
+    if chips:
+        prompt = "you> Choose a refinement number or type a message: "
+    reply = (await asyncio.to_thread(input, prompt)).strip()
+    if reply.isdigit() and chips:
         index = int(reply) - 1
         if 0 <= index < len(chips):
-            return apply_refinement(current_request, chips[index])
-        print(f"Choose a number from 1 to {len(chips)}.")
-        return None
-    custom = RefinementChip(label=reply, instruction=reply)
-    return apply_refinement(current_request, custom)
+            return chips[index].instruction
+    return reply
 
 
 async def run_chat() -> None:
     database = Path(os.getenv("RETAIL_DB", str(DEFAULT_DB)))
     repository = ABOCatalogRepository(database)
     client = resolve_client()
-    tools = build_tools(repository)
-    discovery = build_discovery_agent(client)
-    research = build_research_agent(client, tools)
-    critic = build_critic_agent(client)
+    tracker = CatalogEvidenceTracker()
+    catalog_tools = _build_catalog_tools(repository, catalog_tracker=tracker)
+    agent = build_shopping_agent(client, catalog_tools, tracker=tracker)
+    session = agent.create_session()
     stats = repository.stats()
 
     print(
@@ -138,33 +154,42 @@ async def run_chat() -> None:
     )
     print("RetailConcierge ready (ABO catalog). Type 'quit' to exit.\n")
 
+    chips: tuple[RefinementChip, ...] = ()
     try:
         while True:
             try:
-                user_message = (await asyncio.to_thread(input, "you> ")).strip()
+                user_message = await _next_message(chips)
             except (EOFError, KeyboardInterrupt):
                 print("\nbye.")
                 break
             if not user_message or user_message.lower() in {"quit", "exit"}:
                 break
 
-            current_request = user_message
-            while current_request:
-                try:
-                    result = await run_collaboration(
-                        discovery,
-                        research,
-                        critic,
-                        current_request,
-                        _request_clarification,
-                    )
-                except Exception as exc:
-                    print(f"\n[error] {exc}")
-                    break
-                _show_result(result)
-                current_request = await _next_refinement(
-                    current_request, result.refinement_chips
+            tracker.reset()
+            try:
+                response = await agent.run(user_message, session=session)
+                text = getattr(response, "text", None) or str(response)
+            except Exception as exc:
+                print(f"\n[error] {exc}")
+                chips = ()
+                continue
+
+            try:
+                parsed = parse_recommendation(text)
+            except ValueError:
+                print(f"\nRetailConcierge: {text.strip()}")
+                chips = ()
+                continue
+            try:
+                recommendation = enforce_finalized_recommendation(
+                    parsed,
+                    finalized_candidates_from_response(response),
                 )
+            except ValueError as exc:
+                print(f"\n[error] {exc}")
+                chips = ()
+                continue
+            chips = _show_recommendation(recommendation)
     finally:
         repository.close()
 

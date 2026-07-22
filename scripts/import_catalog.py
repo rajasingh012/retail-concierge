@@ -6,7 +6,6 @@ import gzip
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import sys
 import time
@@ -15,7 +14,7 @@ from typing import Iterable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from infrastructure.database import DIMENSIONS_SCHEMA, FTS_SCHEMA, INDEX_SCHEMA, TEXT_VALUES_SCHEMA, create_schema
+from infrastructure.database import create_schema
 
 SHARD_PATTERN = "listings_*.json.gz"
 
