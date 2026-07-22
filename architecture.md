@@ -38,27 +38,60 @@ The five MAF tools, in call order:
 ## Conversation
 
 ```text
-user message / refinement
-    |
-    v
-extract_brief (structured brief with currency/dimension parsing)
-    |-- complete=false, question --> concise clarification --> user answer (max 2x) --|
-    |                                                                             <---|
-    |-- complete=true, brief
-    |      |
-    |      v
-    find_product_types / find_brands (canonicalize against catalog)
-    |      |
-    |      v
-    search_catalog (up to 50 BM25 candidates)
-    |      |
-    |      v
-    classify product identity + finalize_recommendations
-    |      |
-    |      v
-    protected ranked products + evidence notes + refinement chips
-    |
-    `-- user follow-up or selected refinement --> same AgentSession (fresh brief)
+                   ┌──────────────────────────────────────────────┐
+                   │          user message / refinement           │
+                   └────────────────────┬─────────────────────────┘
+                                        │
+                                        v
+                   ┌──────────────────────────────────────────────┐
+                   │           extract_brief                      │
+                   │  (structured brief + currency/dimension      │
+                   │   parsing + 2-question clarification budget) │
+                   └─────────┬────────────────────┬───────────────┘
+                             │                    │
+                    complete=false          complete=true
+                    question="..."          with brief
+                             │                    │
+                             v                    v
+                  ┌────────────────────┐  ┌──────────────────────────┐
+                  │ concise question   │  │ find_product_types /     │
+                  │    → user answer   │  │ find_brands (canonicalize│
+                  │    (max 2 per turn)│  │  against catalog)        │
+                  └────────┬───────────┘  └────────────┬─────────────┘
+                           │                            │
+                           └──── (back to extract_brief)│
+                                                        v
+                                        ┌──────────────────────────────┐
+                                        │       search_catalog         │
+                                        │  (BM25, up to 50 candidates) │
+                                        └────────────┬─────────────────┘
+                                                     │
+                                                     v
+                                        ┌──────────────────────────────┐
+                                        │  classify product identity   │
+                                        │  → exact_product / accessory │
+                                        │    / unrelated / uncertain   │
+                                        └────────────┬─────────────────┘
+                                                     │
+                                                     v
+                                        ┌──────────────────────────────┐
+                                        │  finalize_recommendations    │
+                                        │  • catalog-provenance gate   │
+                                        │  • deterministic ranking     │
+                                        └────────────┬─────────────────┘
+                                                     │
+                                                     v
+                                        ┌──────────────────────────────┐
+                                        │  protected ranked products   │
+                                        │  + evidence notes           │
+                                        │  + assumptions              │
+                                        │  + refinement chips         │
+                                        └────────────┬─────────────────┘
+                                                     │
+                                        user follow-up or selected chip
+                                                     │
+                                                     └──→ same AgentSession
+                                                          (fresh brief)
 ```
 
 The default path shows products without interruption. Compatibility uncertainty, fundamentally different product interpretations, conflicting explicit constraints, or silent relaxation of a must-have can trigger one question. Missing budget, brand, color, or a nice-to-have does not block useful results.
