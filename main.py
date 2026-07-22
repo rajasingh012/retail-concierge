@@ -17,8 +17,8 @@ from use_cases.shopping_agent import (
     parse_recommendation,
 )
 
-DEFAULT_PROVIDER = "vllm"
-DEFAULT_MODEL = "google/gemma-3-27b-it"
+DEFAULT_PROVIDER = "minimax"
+DEFAULT_MODEL = "MiniMax-M3"
 DEFAULT_DB = Path("./retail_catalog.db")
 MAX_REFINEMENT_CHIPS = 4
 
@@ -177,18 +177,36 @@ async def run_chat() -> None:
             try:
                 parsed = parse_recommendation(text)
             except ValueError:
-                print(f"\nRetailConcierge: {text.strip()}")
-                chips = ()
-                continue
-            try:
-                recommendation = enforce_finalized_recommendation(
-                    parsed,
-                    finalized_candidates_from_response(response),
-                )
-            except ValueError as exc:
-                print(f"\n[error] {exc}")
-                chips = ()
-                continue
+                # Model didn't produce JSON. Check if finalizer ran.
+                finalized = finalized_candidates_from_response(response)
+                if finalized is not None:
+                    # Build a recommendation from the finalizer result.
+                    recommendation = enforce_finalized_recommendation(
+                        {
+                            "kind": "recommendations",
+                            "ranked": [{"item_id": c.get("item_id")} for c in finalized],
+                            "assumptions": [],
+                            "notes": [
+                                "Model narrated instead of outputting structured JSON."
+                            ],
+                            "refinement_chips": [],
+                        },
+                        finalized,
+                    )
+                else:
+                    print(f"\nRetailConcierge: {text.strip()}")
+                    chips = ()
+                    continue
+            else:
+                try:
+                    recommendation = enforce_finalized_recommendation(
+                        parsed,
+                        finalized_candidates_from_response(response),
+                    )
+                except ValueError as exc:
+                    print(f"\n[error] {exc}")
+                    chips = ()
+                    continue
             chips = _show_recommendation(recommendation)
     finally:
         repository.close()

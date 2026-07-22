@@ -16,10 +16,13 @@ uv sync
 # Build the ABO catalog (requires the abo-listings.tar.gz dataset)
 uv run python scripts/import_catalog.py --shards data/abo/listings/
 
-# AMD MI300X (vLLM)
+# Default: MiniMax-M3 (set MINIMAX_API_KEY in your environment)
+uv run python main.py
+
+# AMD MI300X (vLLM with Gemma 4)
 RETAIL_PROVIDER=vllm \
 RETAIL_BASE_URL=http://<droplet-ip>:8000/v1 \
-RETAIL_MODEL=google/gemma-3-27b-it \
+RETAIL_MODEL=google/gemma-4-31b-it \
   uv run python main.py
 
 # Local development via DeepSeek

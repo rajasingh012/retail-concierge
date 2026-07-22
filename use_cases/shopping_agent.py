@@ -321,22 +321,47 @@ def finalized_candidates_from_response(response: Any) -> list[dict[str, Any]] | 
 
 
 def parse_recommendation(text: str) -> dict[str, Any]:
-    """Parse and validate a recommendation response from the shopping agent."""
+    """Parse and validate a recommendation response from the shopping agent.
+
+    Extracts the first top-level JSON object from the text, accepting
+    fenced code blocks and free-text narration before/after the JSON.
+    """
     candidate = text.strip()
+    # Strip fenced code blocks if present
     if candidate.startswith("```"):
         lines = candidate.splitlines()
         lines = lines[1:]
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         candidate = "\n".join(lines).strip()
-    try:
-        value = json.loads(candidate)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise ValueError("Shopping agent returned an invalid recommendation") from exc
-    if not isinstance(value, dict) or value.get("kind") != "recommendations":
-        raise ValueError("Shopping agent response is not a recommendation object")
-    if not isinstance(value.get("ranked"), list):
-        raise ValueError("Shopping agent recommendation needs a ranked array")
-    if not isinstance(value.get("refinement_chips", []), list):
-        raise ValueError("Shopping agent refinement_chips must be an array")
-    return value
+    # Brace-match through prose to find the first JSON object
+    for start in range(len(candidate)):
+        if candidate[start] == "{":
+            depth = 0
+            for end in range(start, len(candidate)):
+                ch = candidate[end]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        block = candidate[start : end + 1]
+                        try:
+                            value = json.loads(block)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if not isinstance(value, dict) or value.get("kind") != "recommendations":
+                            # Nested JSON object (e.g. a product inside ranked) —
+                            # skip it and keep looking for the outer contract.
+                            continue
+                        if not isinstance(value.get("ranked"), list):
+                            raise ValueError(
+                                "Shopping agent recommendation needs a ranked array"
+                            )
+                        if not isinstance(value.get("refinement_chips", []), list):
+                            raise ValueError(
+                                "Shopping agent refinement_chips must be an array"
+                            )
+                        return value
+                    break
+    raise ValueError("Shopping agent returned an invalid recommendation")

@@ -18,27 +18,40 @@ The importer reads gzipped NDJSON shards, builds the listing, structured text-va
 
 Use one MI300X GPU Droplet with the vLLM 1-Click image. The available credit covers GPU usage only; set a hard spending cap before creating the droplet and destroy it after each session.
 
+The 1-Click image ships vLLM 0.23.0 on ROCm 7.2.4 (Ubuntu 24.04) inside a Docker container. It does **not** come with Gemma 4 31B pre-installed — the model is downloaded from Hugging Face on first launch (~5-10 minutes on the first run, cached afterwards).
+
 1. Create a cloud firewall allowing SSH and port 8000 only from your public IP.
 2. Create the MI300X droplet and add your SSH key.
-3. Verify the GPU and vLLM container:
+3. SSH in and verify the GPU and Docker container:
 
 ```bash
 amd-smi --showproductname --showuse --showmeminfo vram
 docker ps
 ```
 
-4. Start vLLM:
+Read the MOTD — it prints the JupyterLab URL/token, the vLLM container name, and the `docker exec` command for an interactive shell.
+
+4. Upload and run the project's launcher script, passing the model you want:
 
 ```bash
-./scripts/serve-vllm-rocm.sh
+scp scripts/serve-vllm-rocm.sh root@<droplet-ip>:/root/
+ssh root@<droplet-ip> bash /root/serve-vllm-rocm.sh
 ```
+
+Set `VLLM_MODEL` to download a different model (default is `google/gemma-3-27b-it`):
+
+```bash
+VLLM_MODEL=google/gemma-4-31b-it ssh root@<droplet-ip> bash /root/serve-vllm-rocm.sh
+```
+
+The script stops the default vLLM process, then re-launches it inside the container with prefix caching, chunked prefill, fp8 KV cache, and speculative decoding.
 
 5. Run the catalog and agent on the laptop, pointing inference at the droplet:
 
 ```bash
 RETAIL_PROVIDER=vllm \
 RETAIL_BASE_URL=http://<droplet-ip>:8000/v1 \
-RETAIL_MODEL=google/gemma-3-27b-it \
+RETAIL_MODEL=google/gemma-4-31b-it \
   uv run python main.py
 ```
 
@@ -48,7 +61,7 @@ RETAIL_MODEL=google/gemma-3-27b-it \
 VLLM_METRICS_URL=http://<droplet-ip>:8000/metrics \
 RETAIL_PROVIDER=vllm \
 RETAIL_BASE_URL=http://<droplet-ip>:8000/v1 \
-RETAIL_MODEL=google/gemma-3-27b-it \
+RETAIL_MODEL=google/gemma-4-31b-it \
   uv run python bench/run_agent_bench.py
 ```
 

@@ -1,13 +1,13 @@
 """Chat client factory — provider-agnostic LLM access.
 
 Uses Microsoft Agent Framework's `OpenAIChatCompletionClient`, which natively
-speaks the OpenAI Chat Completions wire protocol. Both vLLM (on AMD Dev Cloud
-MI300X) and DeepSeek expose this endpoint, so swapping backends is just a
-`base_url` change.
+speaks the OpenAI Chat Completions wire protocol. All providers (vLLM, DeepSeek,
+MiniMax) expose this endpoint, so swapping backends is just a `base_url` change.
 
 Provider presets:
     vllm     → AMD Developer Cloud MI300X, default base http://localhost:8000/v1
-    deepseek → local-dev fallback, https://api.deepseek.com/v1
+    deepseek → cloud API, https://api.deepseek.com/v1
+    minimax  → cloud API, https://api.minimax.chat/v1
 
 Adding a provider = one entry in PROVIDERS below.
 """
@@ -22,8 +22,9 @@ from agent_framework.openai import OpenAIChatCompletionClient
 # ---------- provider registry ----------
 # Each entry: (default_base_url, env_var_for_api_key)
 PROVIDERS: dict[str, tuple[str, str | None]] = {
-    "vllm":     ("http://localhost:8000/v1", None),         # no auth on local vLLM
+    "vllm":     ("http://localhost:8000/v1", None),
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
+    "minimax":  ("https://api.minimax.chat/v1", "MINIMAX_API_KEY"),
 }
 
 

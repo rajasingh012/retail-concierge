@@ -92,7 +92,7 @@ def screen_and_rank_candidates(
         if item_id in seen_ids:
             classifications["duplicate"] += 1
             continue
-        classification = raw.get("product_type_match")
+        classification = raw.get("product_type_match") or raw.get("classification")
         if not isinstance(classification, str):
             raise ValueError("Each shopping candidate needs product_type_match")
         classifications[classification] += 1
