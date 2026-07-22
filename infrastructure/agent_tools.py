@@ -121,6 +121,36 @@ def build_tools(
         )
 
     @tool(
+        name="find_brands",
+        description=(
+            "Find brand names in the ABO catalog matching a name fragment. "
+            "Call this before search_catalog to identify the canonical brand "
+            "name to filter by."
+        ),
+    )
+    def find_brands(
+        query: Annotated[
+            str,
+            Field(description="Brand name fragment such as ergocomfort or secretlab"),
+        ],
+        limit: Annotated[
+            int,
+            Field(description="Maximum brands to return; clamped to 1-20"),
+        ] = 5,
+    ) -> str:
+        safe_limit = clamp_limit(limit, default=5, maximum=20)
+        key = json.dumps(
+            [repo_namespace, "find_brands", query, safe_limit],
+            ensure_ascii=False,
+        )
+        return _cached(
+            key,
+            lambda: json.dumps(
+                repository.find_brands(query, safe_limit), ensure_ascii=False
+            ),
+        )
+
+    @tool(
         name="search_catalog",
         description=(
             "Search the offline ABO catalog with BM25 title relevance and optional "
@@ -191,4 +221,4 @@ def build_tools(
             lambda: json.dumps(candidates, ensure_ascii=False),
         )
 
-    return [find_product_types, search_catalog]
+    return [find_product_types, find_brands, search_catalog]

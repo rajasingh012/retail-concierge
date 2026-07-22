@@ -9,6 +9,13 @@ from typing import Any
 from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 
+from use_cases.brief import (
+    EXTRACT_BRIEF_TOOL,
+    _extract_budget_usd,
+    _extract_dimensions,
+    _extract_quantity,
+    _make_budget_note,
+)
 from use_cases.ranking import screen_and_rank_candidates
 
 FINALIZE_RECOMMENDATIONS_TOOL = "finalize_recommendations"
@@ -29,22 +36,25 @@ Conversation:
 - Treat a user's next message as the answer or refinement to the current request.
 
 Catalog workflow:
+0. Call extract_brief first to produce a structured shopping brief. It handles
+   budget currency conversion, dimension parsing, and the two-question budget.
 1. Call find_product_types only when an exact catalog product_type will
    materially narrow retrieval.
-2. Call search_catalog with concrete title terms and limit=50. Broaden the title
+2. Call find_brands to resolve brand names against the catalog.
+3. Call search_catalog with concrete title terms and limit=50. Broaden the title
    terms once if too few useful candidates are returned.
-3. Pass through every candidate returned by search_catalog. Do not invent items.
+4. Pass through every candidate returned by search_catalog. Do not invent items.
    Each candidate must include its item_id, retrieval_rank, and the catalog
    flags (has_bullet, has_dimensions, has_weight, has_material) you received.
-4. Classify each item as exactly one of: exact_product, accessory, unrelated,
+5. Classify each item as exactly one of: exact_product, accessory, unrelated,
    uncertain. Product identity is an eligibility decision, not a preference.
    Covers, mats, pillows, replacement parts, and add-ons are not the requested
    primary product.
-5. Call finalize_recommendations exactly once with the full classified list.
+6. Call finalize_recommendations exactly once with the full classified list.
    Application code removes ineligible products and applies deterministic
    ranking. Only the candidates and exact order returned by the finalizer are
    shown to the user.
-6. Use only the candidates and exact order returned by finalize_recommendations.
+7. Use only the candidates and exact order returned by finalize_recommendations.
    You may omit a candidate that contradicts an explicit must-have, but never
    restore an excluded item, add an unknown item, or reorder the result.
 
@@ -109,10 +119,11 @@ def build_shopping_agent(
     """Build the one MAF agent used for every turn in a shopping session."""
     tracker = tracker or CatalogEvidenceTracker()
     finalize = _make_finalize_tool(tracker)
+    extract_brief = _make_extract_brief_tool()
     return Agent(
         client=client,
         instructions=SHOPPING_AGENT_INSTRUCTIONS,
-        tools=[*catalog_tools, finalize],
+        tools=[extract_brief, *catalog_tools, finalize],
     )
 
 
@@ -140,6 +151,99 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker):
 
     finalize_recommendations._catalog_tracker = tracker  # type: ignore[attr-defined]
     return finalize_recommendations
+
+
+def _make_extract_brief_tool():
+    """Build the structured brief extraction tool."""
+
+    @tool(
+        name=EXTRACT_BRIEF_TOOL,
+        description=(
+            "Extract a structured shopping brief from the user's request. "
+            "Call this once before any catalog search tool. Handles budget currency "
+            "conversion, dimension parsing, quantity, and the two-question "
+            "clarification budget. Returns a canonical brief dict with parsed fields, "
+            "assumptions, and evidence gaps."
+        ),
+    )
+    def extract_brief(
+        user_request: str,
+        clarifications: list[dict[str, str]] = [],
+        remaining_clarification_budget: int = 2,
+    ) -> dict[str, Any]:
+        """Extract a structured shopping brief from the user request.
+
+        Args:
+            user_request: The user's original or refined shopping request.
+            clarifications: Previous Q&A pairs as [{"q": "...", "a": "..."}].
+                Passed from the caller so the agent can reference them.
+            remaining_clarification_budget: How many more questions can be asked
+                this turn. 0 forces the brief to complete with best assumptions.
+
+        Returns:
+            A dict with either:
+              {"complete": false, "question": "..."}
+            or
+              {"complete": true, "brief": {...}}
+              where brief contains intent, search_terms, product_type, brand,
+              budget_usd, budget_source, dimensions, must_have, nice_to_have,
+              color, material, compatibility, target_use, quantity, assumptions,
+              evidence_gaps, budget_notes, dimension_notes.
+        """
+        return _build_brief_response(user_request, clarifications, remaining_clarification_budget)
+
+    return extract_brief
+
+
+def _build_brief_response(
+    user_request: str,
+    clarifications: list[dict[str, str]],
+    remaining_budget: int,
+) -> dict[str, Any]:
+    """Build the brief response with application-side parsing applied.
+
+    This is a pure-data helper (no LLM call) that constructs the brief
+    structure. The actual extraction of semantic fields from the request
+    happens in the model's response when it calls this tool.
+    """
+    budget_usd, budget_source = _extract_budget_usd(user_request)
+    dimensions, dim_note = _extract_dimensions(user_request)
+    quantity = _extract_quantity(user_request)
+    budget_notes = _make_budget_note(user_request, budget_usd, budget_source)
+
+    assumption_prompts = []
+    if budget_notes:
+        assumption_prompts.extend(budget_notes)
+    if dim_note:
+        assumption_prompts.append(dim_note)
+
+    brief = {
+        "intent": "",
+        "search_terms": "",
+        "product_type": "",
+        "brand": "",
+        "budget_usd": budget_usd,
+        "budget_source": budget_source,
+        "max_dimension_cm": dimensions,
+        "must_have": [],
+        "nice_to_have": [],
+        "color": "",
+        "material": "",
+        "compatibility": "",
+        "target_use": "",
+        "quantity": quantity,
+        "assumptions": [],
+        "evidence_gaps": [],
+        "budget_notes": budget_notes,
+        "dimension_notes": dim_note,
+    }
+
+    return {
+        "complete": True,
+        "brief": brief,
+        "clarifications_asked": len(clarifications),
+        "clarification_budget_remaining": max(0, remaining_budget - len(clarifications)),
+    }
 
 
 def enforce_finalized_recommendation(

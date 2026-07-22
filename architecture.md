@@ -4,7 +4,7 @@
 
 ```text
 domain/          catalog evidence contracts
-use_cases/       one conversational shopping agent and deterministic ranking
+use_cases/       shopping agent, brief extraction, and deterministic ranking
 infrastructure/  SQLite catalog, FTS5 search, MAF tools, chat client factory
 scripts/         ABO NDJSON importer, vLLM launcher, droplet firewall
 bench/           agent benchmark and AMD metrics
@@ -17,31 +17,48 @@ The agent receives Microsoft Agent Framework's `OpenAIChatCompletionClient`; vLL
 
 RetailConcierge is one MAF `Agent` responsible for the complete user conversation:
 
-- ask only blocking clarification questions
-- retain answers and refinements in one `AgentSession`
-- call `find_product_types` and `search_catalog`
+- call `extract_brief` first to produce a structured brief with application-side currency conversion and dimension parsing
+- ask only blocking clarification questions (capped at 2 per turn by the brief tool)
+- call `find_product_types` and `find_brands` to canonicalize names against the catalog
+- call `search_catalog` to retrieve BM25 candidates
 - classify every retrieved item as `exact_product`, `accessory`, `unrelated`, or `uncertain`
+- call `finalize_recommendations` for the catalog-provenance gate and deterministic ranking
 - explain supported recommendations and evidence gaps
 
-The agent calls `finalize_recommendations` after classification. That application-owned tool removes every non-exact product and applies deterministic ranking. The final response is checked against that protected candidate set, so the model cannot restore an excluded product, introduce an unknown ID, or change the deterministic order.
+The five MAF tools, in call order:
+
+| Tool | Description |
+|---|---|
+| `extract_brief` | Reasoning-only. Returns structured brief (intent, search_terms, product_type, brand, budget_usd converted from any currency, max_dimension_cm converted to cm, must_have, nice_to_have, color, material, compatibility, target_use, quantity, assumptions, evidence_gaps). Handles the two-question clarification budget. No database access — pure parsing in `use_cases/brief.py`. |
+| `find_product_types` | LIKE-match against the `product_type` column, ordered by listing count. |
+| `find_brands` | Three-tier brand resolution: exact prefix → FTS5 (stemming + close misspellings) → LIKE fallback. |
+| `search_catalog` | BM25 via FTS5, up to 50 candidates with optional product-type, brand, and dimension filters. Records observed `item_id` values into the session's `CatalogEvidenceTracker`. |
+| `finalize_recommendations` | Drops candidates whose `item_id` was not observed by `search_catalog` in the current session, keeps only `exact_product`, applies deterministic multi-field ranking, and returns the authoritative order. |
 
 ## Conversation
 
 ```text
-user message
+user message / refinement
     |
     v
-RetailConcierge Agent (shared AgentSession)
-    |-- blocking ambiguity --> concise question --> user answer --|
-    |                                                        <-----|
-    |-- find_product_types (when useful)
-    |-- search_catalog (up to 50 BM25 candidates)
-    |-- classify product identity
-    |-- finalize_recommendations
-    v
-protected ranked products + evidence notes + refinement chips
+extract_brief (structured brief with currency/dimension parsing)
+    |-- complete=false, question --> concise clarification --> user answer (max 2x) --|
+    |                                                                             <---|
+    |-- complete=true, brief
+    |      |
+    |      v
+    find_product_types / find_brands (canonicalize against catalog)
+    |      |
+    |      v
+    search_catalog (up to 50 BM25 candidates)
+    |      |
+    |      v
+    classify product identity + finalize_recommendations
+    |      |
+    |      v
+    protected ranked products + evidence notes + refinement chips
     |
-    `-- user follow-up or selected refinement --> same AgentSession
+    `-- user follow-up or selected refinement --> same AgentSession (fresh brief)
 ```
 
 The default path shows products without interruption. Compatibility uncertainty, fundamentally different product interpretations, conflicting explicit constraints, or silent relaxation of a must-have can trigger one question. Missing budget, brand, color, or a nice-to-have does not block useful results.

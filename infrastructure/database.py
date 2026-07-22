@@ -189,6 +189,87 @@ class ABOCatalogRepository:
             for row in rows
         ]
 
+    def find_brands(self, query: str, limit: int = 5) -> list[dict[str, object]]:
+        """Return brand buckets ordered by listing count.
+
+        Uses three-tier matching: exact prefix, FTS5, then LIKE fallback.
+        """
+        limit = max(1, min(limit, 20))
+        pattern = f"%{query.strip().lower()}%"
+        seen: set[str] = set()
+        rows: list[dict[str, object]] = []
+
+        # Tier 1: exact prefix match (fast, highest precision)
+        tier1 = self._conn.execute(
+            """
+            SELECT brand_en, COUNT(*) AS product_count
+            FROM listings
+            WHERE LOWER(IFNULL(brand_en, '')) LIKE ? ESCAPE '\\'
+            GROUP BY brand_en
+            ORDER BY product_count DESC, brand_en
+            LIMIT ?
+            """,
+            (f"{query.strip().lower()}%", limit),
+        ).fetchall()
+        for row in tier1:
+            brand = row["brand_en"]
+            if brand and brand not in seen:
+                seen.add(brand)
+                rows.append({"brand": brand, "product_count": row["product_count"]})
+                if len(rows) >= limit:
+                    break
+
+        # Tier 2: FTS5 (handles stemming, diacritics, close misspellings)
+        if len(rows) < limit:
+            expression = _fts_expression(query)
+            if expression:
+                tier2 = self._conn.execute(
+                    """
+                    SELECT l.brand_en, COUNT(*) AS product_count
+                    FROM listing_fts AS f
+                    JOIN listings AS l ON l.id = f.rowid
+                    WHERE f.brand_en MATCH ?
+                      AND l.brand_en IS NOT NULL AND l.brand_en <> ''
+                    GROUP BY l.brand_en
+                    ORDER BY product_count DESC
+                    LIMIT ?
+                    """,
+                    (expression, limit - len(rows)),
+                ).fetchall()
+                for row in tier2:
+                    brand = row["brand_en"]
+                    if brand and brand not in seen:
+                        seen.add(brand)
+                        rows.append(
+                            {"brand": brand, "product_count": row["product_count"]}
+                        )
+                        if len(rows) >= limit:
+                            break
+
+        # Tier 3: LIKE %query% fallback
+        if len(rows) < limit:
+            tier3 = self._conn.execute(
+                """
+                SELECT brand_en, COUNT(*) AS product_count
+                FROM listings
+                WHERE LOWER(IFNULL(brand_en, '')) LIKE ?
+                GROUP BY brand_en
+                ORDER BY product_count DESC, brand_en
+                LIMIT ?
+                """,
+                (pattern, limit - len(rows)),
+            ).fetchall()
+            for row in tier3:
+                brand = row["brand_en"]
+                if brand and brand not in seen:
+                    rows.append(
+                        {"brand": brand, "product_count": row["product_count"]}
+                    )
+                    if len(rows) >= limit:
+                        break
+
+        return rows
+
     def search(
         self,
         query: str,

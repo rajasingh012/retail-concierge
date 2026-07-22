@@ -12,6 +12,7 @@ from infrastructure.database import ABOCatalogRepository
 from main import _format_product
 from use_cases.ranking import screen_and_rank_candidates
 from use_cases.shopping_agent import (
+    EXTRACT_BRIEF_TOOL,
     FINALIZE_RECOMMENDATIONS_TOOL,
     SHOPPING_AGENT_INSTRUCTIONS,
     CatalogEvidenceTracker,
@@ -128,7 +129,7 @@ def test_tool_cache_tracks_hits(tmp_path: Path) -> None:
     db_path = tmp_path / "catalog.db"
     import_catalog(archive, db_path)
     repo = ABOCatalogRepository(db_path)
-    search_catalog = build_tools(repo)[1]
+    search_catalog = build_tools(repo)[2]
     clear_cache()
     kwargs = {
         "query": "office chair",
@@ -168,7 +169,8 @@ def test_single_agent_is_built_with_catalog_and_finalize_tools(tmp_path: Path) -
     catalog_tools = build_tools(repo, catalog_tracker=tracker)
     agent = build_shopping_agent(FakeClient(), catalog_tools, tracker=tracker)
     assert agent.default_options["instructions"] == SHOPPING_AGENT_INSTRUCTIONS
-    assert len(agent.default_options["tools"]) == 3
+    assert len(agent.default_options["tools"]) == 5
+    assert agent.default_options["tools"][0].name == EXTRACT_BRIEF_TOOL
     assert agent.default_options["tools"][-1].name == FINALIZE_RECOMMENDATIONS_TOOL
     repo.close()
 
@@ -225,7 +227,7 @@ def test_finalize_tool_enforces_eligibility_order_and_provenance(tmp_path: Path)
     repo = ABOCatalogRepository(db_path)
 
     tracker = CatalogEvidenceTracker()
-    search_catalog = build_tools(repo, catalog_tracker=tracker)[1]
+    search_catalog = build_tools(repo, catalog_tracker=tracker)[2]
     candidates_payload = json.loads(search_catalog(query="office chair", limit=10))
 
     finalizer = _make_finalize_tool(tracker)
