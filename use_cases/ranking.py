@@ -5,6 +5,8 @@ import math
 from collections import Counter
 from typing import Any
 
+from domain.recommendation import FinalizedCandidate
+
 ELIGIBLE_PRODUCT_TYPE = "exact_product"
 MAX_RANKED_CANDIDATES = 8
 
@@ -139,8 +141,10 @@ def screen_and_rank_candidates(
     for position, candidate in enumerate(ranked, start=1):
         candidate["ranking_position"] = position
 
+    typed_ranked = [FinalizedCandidate.model_validate(item) for item in ranked]
+
     normalized = dict(research)
-    normalized["candidates"] = ranked
+    normalized["candidates"] = typed_ranked
     normalized["eligible_item_ids"] = [candidate.get("item_id") for candidate in ranked]
     summary = research.get("screening_summary", {})
     normalized["screening_summary"] = {

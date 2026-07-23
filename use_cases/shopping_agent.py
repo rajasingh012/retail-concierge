@@ -1,6 +1,5 @@
 """Single conversational shopping agent with deterministic catalog safeguards."""
 from __future__ import annotations
-
 import json
 import threading
 from collections import OrderedDict
@@ -9,6 +8,17 @@ from typing import Any
 from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 
+from infrastructure.chat_clients import provider_extras
+
+from domain.recommendation import (
+    FinalizedCandidate,
+    MAX_RANKED_PRODUCTS,
+    MAX_REFINEMENT_CHIPS,
+    RankedItem,
+    RecommendationResponse,
+    RefinementChip,
+    extract_json_object,
+)
 from use_cases.brief import (
     EXTRACT_BRIEF_TOOL,
     _extract_budget_usd,
@@ -61,31 +71,24 @@ Catalog workflow:
 Final response:
 - For a clarification, respond with only the natural-language question. Do not
   call finalize_recommendations first.
-- For recommendations, return exactly one JSON object and no surrounding prose:
-{
-  "kind": "recommendations",
-  "ranked": [
-    {
-      "rank": 1,
-      "item_id": "...",
-      "title_en": "...",
-      "brand_en": "...",
-      "product_type": "...",
-      "product_url": "...",
-      "why_it_fits": ["catalog-backed reason"],
-      "trade_offs": ["specific limitation or unknown"]
-    }
-  ],
-  "assumptions": ["assumption used to proceed"],
-  "notes": ["screening or evidence limitation"],
-  "recommendation": "one concise action",
-  "refinement_chips": [
-    {"label": "short option", "instruction": "self-contained refinement"}
-  ],
-  "dataset_notice": "This is an offline product catalog snapshot with typed dimensions, material, color, and brand metadata but no prices, ratings, or live availability."
-}
-Return at most five ranked products and four contextual refinement chips. Never
-invent specifications, prices, ratings, availability, shipping, or warranties.
+- For recommendations, return a single JSON object — no surrounding prose, no
+  fenced code blocks, no markdown. Use EXACTLY these field names:
+  {
+    "kind": "recommendations",
+    "ranked": [{"rank": 1, "item_id": "...", "title_en": "...", "brand_en": "...",
+                "product_type": "...", "product_url": "...",
+                "why_it_fits": ["..."], "trade_offs": ["..."]}],
+    "assumptions": ["..."],
+    "notes": ["..."],
+    "recommendation": "...",
+    "refinement_chips": [{"label": "...", "instruction": "..."}],
+    "dataset_notice": "This is an offline product catalog snapshot..."
+  }
+  The "ranked" field name is REQUIRED (not "recommendations"). The
+  "refinement_chips" field name is REQUIRED (not "refinements"). Top-level
+  "kind" must equal the literal string "recommendations".
+- At most 5 entries in "ranked" and 4 entries in "refinement_chips". Never
+  invent specifications, prices, ratings, availability, shipping, or warranties.
 """
 
 
@@ -110,20 +113,54 @@ class CatalogEvidenceTracker:
             self._seen.clear()
 
 
+def _build_agent_tools(
+    catalog_tools: list[Any],
+    *,
+    tracker: CatalogEvidenceTracker,
+) -> list[Any]:
+    """Compose the tool list for the shopping agent.
+
+    Order is part of the contract: ``extract_brief`` runs first, the three
+    catalog tools in between, and ``finalize_recommendations`` last so the
+    model can use the evidence it observed earlier in the turn.
+    """
+    return [
+        _make_extract_brief_tool(),
+        *catalog_tools,
+        _make_finalize_tool(tracker),
+    ]
+
+
 def build_shopping_agent(
     client: OpenAIChatCompletionClient,
     catalog_tools: list[Any],
     *,
     tracker: CatalogEvidenceTracker | None = None,
+    provider: str = "",
 ) -> Agent:
-    """Build the one MAF agent used for every turn in a shopping session."""
+    """Build the one MAF agent used for every turn in a shopping session.
+
+    Args:
+        client: MAF OpenAI-compatible chat client.
+        catalog_tools: Search / brand / product-type tools.
+        tracker: Evidence tracker shared between catalog and finalizer tools.
+        provider: Provider name (``"minimax"``, ``"vllm"``, ``"deepseek"``).
+            Provider-specific request extras (e.g. MiniMax
+            ``reasoning_split``) are looked up via ``provider_extras`` and
+            merged into ``default_options``. Unknown extras on a different
+            provider are forwarded in ``extra_body`` and silently ignored
+            by the server.
+    """
     tracker = tracker or CatalogEvidenceTracker()
-    finalize = _make_finalize_tool(tracker)
-    extract_brief = _make_extract_brief_tool()
+    provider_options = provider_extras(provider) if provider else {}
     return Agent(
         client=client,
         instructions=SHOPPING_AGENT_INSTRUCTIONS,
-        tools=[extract_brief, *catalog_tools, finalize],
+        tools=_build_agent_tools(catalog_tools, tracker=tracker),
+        default_options={
+            "response_format": RecommendationResponse,
+            **provider_options,
+        },
     )
 
 
@@ -142,12 +179,21 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker):
             "search_catalog in this session. Returns the authoritative candidate order."
         ),
     )
-    def finalize_recommendations(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    def finalize_recommendations(
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
         """Screen product identity and deterministically rank exact products."""
-        return screen_and_rank_candidates(
+        result = screen_and_rank_candidates(
             {"candidates": candidates},
             allowed_item_ids=tracker.snapshot(),
         )
+        # MAF serializes tool returns through a generic JSON encoder that does
+        # not understand Pydantic; model_dump explicitly so the wire format is
+        # a plain dict (which MAF round-trips losslessly).
+        result["candidates"] = [
+            candidate.model_dump() for candidate in result["candidates"]
+        ]
+        return result
 
     finalize_recommendations._catalog_tracker = tracker  # type: ignore[attr-defined]
     return finalize_recommendations
@@ -246,52 +292,41 @@ def _build_brief_response(
     }
 
 
-def enforce_finalized_recommendation(
-    recommendation: dict[str, Any], finalized: list[dict[str, Any]] | None
-) -> dict[str, Any]:
-    """Drop unknown products and restore deterministic candidate order and facts."""
-    if finalized is None:
-        raise ValueError(
-            "Shopping agent returned recommendations without finalizing candidates"
-        )
-    by_id = {
-        candidate.get("item_id"): candidate
-        for candidate in finalized
-        if candidate.get("item_id")
-    }
-    agent_ranked = recommendation.get("ranked", [])
-    if not isinstance(agent_ranked, list):
-        raise ValueError("Shopping agent recommendation needs a ranked array")
-    agent_by_id = {
-        item.get("item_id"): item
-        for item in agent_ranked
-        if isinstance(item, dict) and item.get("item_id") in by_id
-    }
-    ranked: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for candidate in finalized:
-        item_id = candidate.get("item_id")
-        if item_id not in agent_by_id or item_id in seen:
-            continue
-        rendered = dict(candidate)
-        generated = agent_by_id[item_id]
-        rendered["why_it_fits"] = generated.get("why_it_fits", [])
-        rendered["trade_offs"] = generated.get("trade_offs", [])
-        ranked.append(rendered)
-        seen.add(item_id)
-        if len(ranked) == 5:
-            break
-    for position, item in enumerate(ranked, start=1):
-        item["rank"] = position
-    normalized = dict(recommendation)
-    normalized["ranked"] = ranked
-    return normalized
+def structured_recommendation_from_response(response: Any) -> RecommendationResponse | None:
+    """Read the typed recommendation from a MAF response.
+
+    Tries ``response.value`` first (provider-native JSON-schema enforcement,
+    e.g. vLLM and OpenAI). Falls back to extracting the JSON object from
+    ``response.text`` and validating against the schema — for providers
+    (MiniMax, DeepSeek) that deliver wrapped or narrated output instead.
+    """
+    try:
+        value = getattr(response, "value", None)
+    except Exception:
+        value = None
+    if isinstance(value, RecommendationResponse):
+        return value
+    text = getattr(response, "text", None)
+    if not text:
+        return None
+    try:
+        return RecommendationResponse.model_validate_json(extract_json_object(text))
+    except Exception:
+        return None
 
 
-def finalized_candidates_from_response(response: Any) -> list[dict[str, Any]] | None:
-    """Read the latest deterministic finalizer result from a MAF response."""
+def finalized_candidates_from_response(response: Any) -> list[FinalizedCandidate] | None:
+    """Read the latest deterministic finalizer result from a MAF response.
+
+    Walks messages in order, collecting function_call names keyed by call_id,
+    then matches each function_result to its calling tool via call_id. MAF
+    stores the tool's return as a JSON string in ``Content.result``; decode it
+    and validate each candidate against the ``FinalizedCandidate`` schema.
+    """
+    import json
+
     call_names: dict[str, str] = {}
-    latest: list[dict[str, Any]] | None = None
+    latest: list[FinalizedCandidate] | None = None
     for message in getattr(response, "messages", []):
         for content in getattr(message, "contents", []):
             content_type = getattr(content, "type", None)
@@ -303,10 +338,8 @@ def finalized_candidates_from_response(response: Any) -> list[dict[str, Any]] | 
                 continue
             if content_type != "function_result":
                 continue
-            call = getattr(content, "function_call", None)
-            name = getattr(call, "name", None) or call_names.get(
-                getattr(content, "call_id", "")
-            )
+            call_id = getattr(content, "call_id", "")
+            name = call_names.get(call_id)
             if name != FINALIZE_RECOMMENDATIONS_TOOL:
                 continue
             result = getattr(content, "result", None)
@@ -315,53 +348,106 @@ def finalized_candidates_from_response(response: Any) -> list[dict[str, Any]] | 
                     result = json.loads(result)
                 except (json.JSONDecodeError, TypeError):
                     continue
-            if isinstance(result, dict) and isinstance(result.get("candidates"), list):
-                latest = result["candidates"]
+            if not isinstance(result, dict):
+                continue
+            raw_candidates = result.get("candidates")
+            if not isinstance(raw_candidates, list):
+                continue
+            try:
+                latest = [FinalizedCandidate.model_validate(item) for item in raw_candidates]
+            except Exception:
+                continue
     return latest
 
 
-def parse_recommendation(text: str) -> dict[str, Any]:
-    """Parse and validate a recommendation response from the shopping agent.
+def enforce_finalized_recommendation(
+    recommendation: RecommendationResponse | dict[str, Any],
+    finalized: list[FinalizedCandidate] | None,
+) -> RecommendationResponse:
+    """Drop unknown products and restore deterministic candidate order and facts.
 
-    Extracts the first top-level JSON object from the text, accepting
-    fenced code blocks and free-text narration before/after the JSON.
+    Accepts either a ``RecommendationResponse`` (the typed result from MAF) or a
+    plain dict (back-compat for callers that haven't migrated). Returns the
+    typed model.
     """
-    candidate = text.strip()
-    # Strip fenced code blocks if present
-    if candidate.startswith("```"):
-        lines = candidate.splitlines()
-        lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        candidate = "\n".join(lines).strip()
-    # Brace-match through prose to find the first JSON object
-    for start in range(len(candidate)):
-        if candidate[start] == "{":
-            depth = 0
-            for end in range(start, len(candidate)):
-                ch = candidate[end]
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        block = candidate[start : end + 1]
-                        try:
-                            value = json.loads(block)
-                        except (json.JSONDecodeError, TypeError):
-                            continue
-                        if not isinstance(value, dict) or value.get("kind") != "recommendations":
-                            # Nested JSON object (e.g. a product inside ranked) —
-                            # skip it and keep looking for the outer contract.
-                            continue
-                        if not isinstance(value.get("ranked"), list):
-                            raise ValueError(
-                                "Shopping agent recommendation needs a ranked array"
-                            )
-                        if not isinstance(value.get("refinement_chips", []), list):
-                            raise ValueError(
-                                "Shopping agent refinement_chips must be an array"
-                            )
-                        return value
-                    break
-    raise ValueError("Shopping agent returned an invalid recommendation")
+    if finalized is None:
+        raise ValueError(
+            "Shopping agent returned recommendations without finalizing candidates"
+        )
+    by_id = {candidate.item_id: candidate for candidate in finalized}
+
+    if isinstance(recommendation, RecommendationResponse):
+        agent_ranked = [item.model_dump() for item in recommendation.ranked]
+    else:
+        agent_ranked = recommendation.get("ranked", [])
+    if not isinstance(agent_ranked, list):
+        raise ValueError("Shopping agent recommendation needs a ranked array")
+
+    agent_by_id: dict[str, dict[str, Any]] = {}
+    for item in agent_ranked:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("item_id")
+        if isinstance(item_id, str) and item_id in by_id and item_id not in agent_by_id:
+            agent_by_id[item_id] = item
+
+    ranked: list[RankedItem] = []
+    seen: set[str] = set()
+    for candidate in finalized:
+        if candidate.item_id not in agent_by_id or candidate.item_id in seen:
+            continue
+        generated = agent_by_id[candidate.item_id]
+        ranked.append(
+            RankedItem(
+                rank=len(ranked) + 1,
+                item_id=candidate.item_id,
+                title_en=candidate.title_en,
+                brand_en=candidate.brand_en,
+                product_type=candidate.product_type,
+                product_url=candidate.product_url,
+                why_it_fits=list(generated.get("why_it_fits", []) or []),
+                trade_offs=list(generated.get("trade_offs", []) or []),
+            )
+        )
+        seen.add(candidate.item_id)
+        if len(ranked) == MAX_RANKED_PRODUCTS:
+            break
+
+    if isinstance(recommendation, RecommendationResponse):
+        return recommendation.model_copy(update={"ranked": ranked})
+    return RecommendationResponse(
+        kind="recommendations",
+        ranked=ranked,
+        assumptions=list(recommendation.get("assumptions", []) or []),
+        notes=list(recommendation.get("notes", []) or []),
+        recommendation=str(recommendation.get("recommendation", "") or ""),
+        refinement_chips=_parse_refinement_chips(recommendation.get("refinement_chips", [])),
+        dataset_notice=str(
+            recommendation.get("dataset_notice", RecommendationResponse.model_fields["dataset_notice"].default) or ""
+        ),
+    )
+
+
+def _parse_refinement_chips(raw: Any) -> list[RefinementChip]:
+    """Validate, deduplicate, and cap refinement chips to MAX_REFINEMENT_CHIPS."""
+    if not isinstance(raw, list):
+        return []
+    chips: list[RefinementChip] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        instruction = item.get("instruction")
+        if not isinstance(label, str) or not label.strip():
+            continue
+        if not isinstance(instruction, str) or not instruction.strip():
+            continue
+        key = (label.strip(), instruction.strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        chips.append(RefinementChip(label=key[0], instruction=key[1]))
+        if len(chips) == MAX_REFINEMENT_CHIPS:
+            break
+    return chips
