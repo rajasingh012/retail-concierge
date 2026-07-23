@@ -3,9 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
+from agent_framework import AgentResponse
+
+from domain.recommendation import (
+    MAX_REFINEMENT_CHIPS,
+    RefinementChip,
+)
 from infrastructure.agent_tools import build_tools as _build_catalog_tools
 from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ABOCatalogRepository
@@ -14,19 +19,12 @@ from use_cases.shopping_agent import (
     CatalogEvidenceTracker,
     enforce_finalized_recommendation,
     finalized_candidates_from_response,
-    parse_recommendation,
+    structured_recommendation_from_response,
 )
 
 DEFAULT_PROVIDER = "minimax"
 DEFAULT_MODEL = "MiniMax-M3"
 DEFAULT_DB = Path("./retail_catalog.db")
-MAX_REFINEMENT_CHIPS = 4
-
-
-@dataclass(frozen=True)
-class RefinementChip:
-    label: str
-    instruction: str
 
 
 def resolve_client():
@@ -65,57 +63,30 @@ def _format_product(product: dict) -> str:
     return "\n".join(lines)
 
 
-def _parse_refinement_chips(recommendation: dict) -> tuple[RefinementChip, ...]:
-    """Validate, deduplicate, and cap user-facing refinements."""
-    raw_chips = recommendation.get("refinement_chips", [])
-    if not isinstance(raw_chips, list):
-        return ()
-    chips: list[RefinementChip] = []
-    seen: set[tuple[str, str]] = set()
-    for raw in raw_chips:
-        if not isinstance(raw, dict):
-            continue
-        label = raw.get("label")
-        instruction = raw.get("instruction")
-        if not isinstance(label, str) or not label.strip():
-            continue
-        if not isinstance(instruction, str) or not instruction.strip():
-            continue
-        key = (label.strip(), instruction.strip())
-        if key in seen:
-            continue
-        seen.add(key)
-        chips.append(RefinementChip(*key))
-        if len(chips) == MAX_REFINEMENT_CHIPS:
-            break
-    return tuple(chips)
-
-
-def _show_recommendation(recommendation: dict) -> tuple[RefinementChip, ...]:
+def _show_recommendation(recommendation) -> tuple[RefinementChip, ...]:
     """Show products first, followed by assumptions and refinement chips."""
-    ranked = recommendation.get("ranked", [])
+    ranked = recommendation.ranked
     print("\nRecommendations")
     if ranked:
-        print("\n\n".join(_format_product(product) for product in ranked))
+        for item in ranked:
+            print(_format_product(item.model_dump()))
     else:
         print("No supported catalog matches were found.")
 
-    if summary := recommendation.get("recommendation"):
-        print(f"\n{summary}")
-    assumptions = recommendation.get("assumptions", [])
-    if assumptions:
+    if recommendation.recommendation:
+        print(f"\n{recommendation.recommendation}")
+    if recommendation.assumptions:
         print("\nAssumptions:")
-        for assumption in assumptions:
+        for assumption in recommendation.assumptions:
             print(f"- {assumption}")
-    notes = recommendation.get("notes", [])
-    if notes:
+    if recommendation.notes:
         print("\nEvidence notes:")
-        for note in notes:
+        for note in recommendation.notes:
             print(f"- {note}")
-    if notice := recommendation.get("dataset_notice"):
-        print(f"\n{notice}")
+    if recommendation.dataset_notice:
+        print(f"\n{recommendation.dataset_notice}")
 
-    chips = _parse_refinement_chips(recommendation)
+    chips = recommendation.refinement_chips[:MAX_REFINEMENT_CHIPS]
     if chips:
         print("\nRefine:")
         print(
@@ -123,7 +94,7 @@ def _show_recommendation(recommendation: dict) -> tuple[RefinementChip, ...]:
                 f"[{index}] {chip.label}" for index, chip in enumerate(chips, start=1)
             )
         )
-    return chips
+    return tuple(chips)
 
 
 async def _next_message(chips: tuple[RefinementChip, ...]) -> str:
@@ -138,13 +109,25 @@ async def _next_message(chips: tuple[RefinementChip, ...]) -> str:
     return reply
 
 
+def _structured_recommendation(response: AgentResponse):
+    """Return the typed RecommendationResponse from the MAF response.
+
+    MAF exposes it as ``response.value`` when ``default_options.response_format``
+    is set and the provider either enforced the schema or MAF's fallback parser
+    succeeded. Returns None for clarification turns or any provider that
+    delivered only narrative text.
+    """
+    return structured_recommendation_from_response(response)
+
+
 async def run_chat() -> None:
     database = Path(os.getenv("RETAIL_DB", str(DEFAULT_DB)))
     repository = ABOCatalogRepository(database)
+    provider = os.getenv("RETAIL_PROVIDER", DEFAULT_PROVIDER)
     client = resolve_client()
     tracker = CatalogEvidenceTracker()
     catalog_tools = _build_catalog_tools(repository, catalog_tracker=tracker)
-    agent = build_shopping_agent(client, catalog_tools, tracker=tracker)
+    agent = build_shopping_agent(client, catalog_tools, tracker=tracker, provider=provider)
     session = agent.create_session()
     stats = repository.stats()
 
@@ -168,23 +151,20 @@ async def run_chat() -> None:
             tracker.reset()
             try:
                 response = await agent.run(user_message, session=session)
-                text = getattr(response, "text", None) or str(response)
             except Exception as exc:
                 print(f"\n[error] {exc}")
                 chips = ()
                 continue
 
-            try:
-                parsed = parse_recommendation(text)
-            except ValueError:
-                # Model didn't produce JSON. Check if finalizer ran.
+            recommendation = _structured_recommendation(response)
+            if recommendation is None:
+                # Clarification turn or unparseable narrative.
                 finalized = finalized_candidates_from_response(response)
                 if finalized is not None:
-                    # Build a recommendation from the finalizer result.
                     recommendation = enforce_finalized_recommendation(
                         {
                             "kind": "recommendations",
-                            "ranked": [{"item_id": c.get("item_id")} for c in finalized],
+                            "ranked": [{"item_id": c.item_id} for c in finalized],
                             "assumptions": [],
                             "notes": [
                                 "Model narrated instead of outputting structured JSON."
@@ -194,19 +174,21 @@ async def run_chat() -> None:
                         finalized,
                     )
                 else:
-                    print(f"\nRetailConcierge: {text.strip()}")
+                    text = response.text or ""
+                    if text.strip():
+                        print(f"\nRetailConcierge: {text.strip()}")
                     chips = ()
                     continue
-            else:
-                try:
-                    recommendation = enforce_finalized_recommendation(
-                        parsed,
-                        finalized_candidates_from_response(response),
-                    )
-                except ValueError as exc:
-                    print(f"\n[error] {exc}")
-                    chips = ()
-                    continue
+
+            try:
+                recommendation = enforce_finalized_recommendation(
+                    recommendation,
+                    finalized_candidates_from_response(response),
+                )
+            except ValueError as exc:
+                print(f"\n[error] {exc}")
+                chips = ()
+                continue
             chips = _show_recommendation(recommendation)
     finally:
         repository.close()

@@ -26,7 +26,7 @@ from use_cases.shopping_agent import (
     CatalogEvidenceTracker,
     enforce_finalized_recommendation,
     finalized_candidates_from_response,
-    parse_recommendation,
+    structured_recommendation_from_response,
 )
 
 SAMPLE_SCENARIOS = [
@@ -79,7 +79,10 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     client = build_chat_client(args.provider, args.model)
     tracker = CatalogEvidenceTracker()
     agent = build_shopping_agent(
-        client, build_catalog_tools(repository, catalog_tracker=tracker), tracker=tracker
+        client,
+        build_catalog_tools(repository, catalog_tracker=tracker),
+        tracker=tracker,
+        provider=args.provider,
     )
     scenarios = SAMPLE_SCENARIOS[: max(1, min(args.turns, len(SAMPLE_SCENARIOS)))]
     metrics_url = os.getenv("VLLM_METRICS_URL", "http://localhost:8000/metrics")
@@ -95,27 +98,36 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             tracker.reset()
             response = await agent.run(scenario, session=agent.create_session())
             elapsed = time.perf_counter() - started
-            text = getattr(response, "text", None) or str(response)
             after = cache_stats()
             response_kind = "error"
             recommendations = 0
             refinements = 0
-            try:
-                parsed = parse_recommendation(text)
-            except ValueError:
+            recommendation_obj = structured_recommendation_from_response(response)
+            finalized = finalized_candidates_from_response(response)
+            if recommendation_obj is None and finalized is None:
                 response_kind = "clarification"
             else:
                 try:
                     recommendation = enforce_finalized_recommendation(
-                        parsed,
-                        finalized_candidates_from_response(response),
+                        recommendation_obj
+                        if recommendation_obj is not None
+                        else {
+                            "kind": "recommendations",
+                            "ranked": [{"item_id": c.item_id} for c in finalized],
+                            "assumptions": [],
+                            "notes": [
+                                "Model narrated instead of outputting structured JSON."
+                            ],
+                            "refinement_chips": [],
+                        },
+                        finalized,
                     )
                 except ValueError as exc:
                     print(f"[bench] scenario {index} finalize error: {exc}")
                 else:
                     response_kind = "recommendations"
-                    recommendations = len(recommendation.get("ranked", []))
-                    refinements = len(recommendation.get("refinement_chips", []))
+                    recommendations = len(recommendation.ranked)
+                    refinements = len(recommendation.refinement_chips)
             row = {
                 "scenario": index,
                 "request": scenario,
