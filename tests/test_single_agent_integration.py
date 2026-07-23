@@ -147,7 +147,7 @@ def test_real_agent_run_reuses_session_and_enforces_provenance(tmp_path: Path) -
     assert "ThinkPad T14" in second_call_text
     finalized = finalized_candidates_from_response(second)
     assert finalized is not None
-    assert [candidate["item_id"] for candidate in finalized] == ["CHARGER1"]
+    assert [candidate.item_id for candidate in finalized] == ["CHARGER1"]
     repo.close()
 
 

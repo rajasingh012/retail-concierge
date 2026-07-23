@@ -7,6 +7,11 @@ from pathlib import Path
 
 from agent_framework import AgentResponse, Content, Message
 
+from domain.recommendation import (
+    FinalizedCandidate,
+    RecommendationResponse,
+    extract_json_object,
+)
 from infrastructure.agent_tools import build_tools, cache_stats, clear_cache, clamp_limit
 from infrastructure.database import ABOCatalogRepository
 from main import _format_product
@@ -14,13 +19,12 @@ from use_cases.ranking import screen_and_rank_candidates
 from use_cases.shopping_agent import (
     EXTRACT_BRIEF_TOOL,
     FINALIZE_RECOMMENDATIONS_TOOL,
-    SHOPPING_AGENT_INSTRUCTIONS,
     CatalogEvidenceTracker,
+    _build_agent_tools,
     _make_finalize_tool,
-    build_shopping_agent,
     enforce_finalized_recommendation,
     finalized_candidates_from_response,
-    parse_recommendation,
+    structured_recommendation_from_response,
 )
 
 
@@ -152,7 +156,7 @@ def test_tool_cache_tracks_hits(tmp_path: Path) -> None:
     repo.close()
 
 
-def test_single_agent_is_built_with_catalog_and_finalize_tools(tmp_path: Path) -> None:
+def test_shopping_agent_wires_tools_in_canonical_order(tmp_path: Path) -> None:
     archive = _write_minimal_shards(
         tmp_path / "archive", [FABRIC_CHAIR, LEATHER_CHAIR, NO_ATTR_CHAIR]
     )
@@ -162,16 +166,17 @@ def test_single_agent_is_built_with_catalog_and_finalize_tools(tmp_path: Path) -
     import_catalog(archive, db_path)
     repo = ABOCatalogRepository(db_path)
 
-    class FakeClient:
-        pass
-
     tracker = CatalogEvidenceTracker()
     catalog_tools = build_tools(repo, catalog_tracker=tracker)
-    agent = build_shopping_agent(FakeClient(), catalog_tools, tracker=tracker)
-    assert agent.default_options["instructions"] == SHOPPING_AGENT_INSTRUCTIONS
-    assert len(agent.default_options["tools"]) == 5
-    assert agent.default_options["tools"][0].name == EXTRACT_BRIEF_TOOL
-    assert agent.default_options["tools"][-1].name == FINALIZE_RECOMMENDATIONS_TOOL
+    tools = _build_agent_tools(catalog_tools, tracker=tracker)
+
+    assert [tool.name for tool in tools] == [
+        EXTRACT_BRIEF_TOOL,
+        "find_product_types",
+        "find_brands",
+        "search_catalog",
+        FINALIZE_RECOMMENDATIONS_TOOL,
+    ]
     repo.close()
 
 
@@ -212,7 +217,10 @@ def test_session_keeps_clarification_answer_in_one_conversation() -> None:
 
     agent, session, first, second = asyncio.run(scenario())
     assert first.text == "Which laptop model do you use?"
-    assert parse_recommendation(second.text)["kind"] == "recommendations"
+    parsed = structured_recommendation_from_response(second)
+    assert isinstance(parsed, RecommendationResponse)
+    assert parsed.kind == "recommendations"
+    assert parsed.ranked == []
     assert [call[1] for call in agent.calls] == [session, session]
 
 
@@ -275,6 +283,10 @@ def test_finalize_tool_enforces_eligibility_order_and_provenance(tmp_path: Path)
     assert screening["returned_classifications"].get("unknown_to_catalog") == 1
     assert screening["returned_classifications"].get("accessory") == 1
 
+    # enforce_finalized_recommendation expects typed candidates; parse the
+    # finalizer output (which is dumped to dicts on the wire) back into
+    # FinalizedCandidate before enforcement.
+    finalized_typed = [FinalizedCandidate.model_validate(item) for item in finalized["candidates"]]
     protected = enforce_finalized_recommendation(
         {
             "kind": "recommendations",
@@ -288,12 +300,13 @@ def test_finalize_tool_enforces_eligibility_order_and_provenance(tmp_path: Path)
             ],
             "refinement_chips": [],
         },
-        finalized["candidates"],
+        finalized_typed,
     )
-    assert [item["item_id"] for item in protected["ranked"]] == [
+    assert isinstance(protected, RecommendationResponse)
+    assert [item.item_id for item in protected.ranked] == [
         candidates_payload[0]["item_id"]
     ]
-    assert protected["ranked"][0]["why_it_fits"] == ["complete chair"]
+    assert protected.ranked[0].why_it_fits == ["complete chair"]
     repo.close()
 
     call = Content.from_function_call(
@@ -304,7 +317,9 @@ def test_finalize_tool_enforces_eligibility_order_and_provenance(tmp_path: Path)
         messages=[Message("assistant", [call]), Message("tool", [result])]
     )
     extracted = finalized_candidates_from_response(response)
-    assert extracted == finalized["candidates"]
+    assert extracted is not None
+    assert [item.item_id for item in extracted] == [finalized["candidates"][0]["item_id"]]
+    assert all(isinstance(item, FinalizedCandidate) for item in extracted)
 
 
 def test_multifield_ranking_uses_abo_signals() -> None:
@@ -334,8 +349,8 @@ def test_multifield_ranking_uses_abo_signals() -> None:
             ]
         }
     )
-    assert [item["item_id"] for item in research["candidates"]] == ["STRONG", "LOW"]
-    signals = research["candidates"][0]["ranking_signals"]
+    assert [item.item_id for item in research["candidates"]] == ["STRONG", "LOW"]
+    signals = research["candidates"][0].ranking_signals
     assert set(signals) == {
         "text_relevance",
         "bullet_coverage",
@@ -345,14 +360,36 @@ def test_multifield_ranking_uses_abo_signals() -> None:
     }
 
 
-def test_parse_recommendation_accepts_fenced_finalize_payload() -> None:
-    response = parse_recommendation(
-        "```json\n"
-        '{"kind":"recommendations","ranked":[],"notes":[],"refinement_chips":[]}'
-        "\n```"
+def test_extract_json_object_handles_provider_wrappers() -> None:
+    payload = (
+        '{"kind":"recommendations","ranked":[],'
+        '"notes":[],"refinement_chips":[]}'
     )
-    assert response["kind"] == "recommendations"
-    assert response["ranked"] == []
+    # 3-backtick fence
+    assert extract_json_object(f"```json\n{payload}\n```") == payload
+    # 4-backtick fence (observed from MiniMax-M3)
+    assert extract_json_object(f"```\n{payload}\n```\n```") == payload
+    # Narrative prefix
+    assert extract_json_object(
+        f"Here you go:\n{payload}\nEnjoy."
+    ) == payload
+    # Reasoning-tag prefix
+    assert extract_json_object(
+        f"<think>\nthinking\n</think>\n{payload}"
+    ) == payload
+    # Plain JSON passes through unchanged
+    assert extract_json_object(payload) == payload
+
+
+def test_structured_recommendation_from_response_validates_against_schema() -> None:
+    payload = (
+        '{"kind":"recommendations","ranked":[],'
+        '"notes":[],"refinement_chips":[]}'
+    )
+    fake = type("Response", (), {"text": f"```json\n{payload}\n```"})()
+    parsed = structured_recommendation_from_response(fake)
+    assert isinstance(parsed, RecommendationResponse)
+    assert parsed.kind == "recommendations"
 
 
 def test_human_readable_product_output() -> None:
