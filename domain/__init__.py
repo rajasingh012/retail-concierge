@@ -7,6 +7,7 @@ from .recommendation import (
     RankedItem,
     RecommendationResponse,
     RefinementChip,
+    ShoppingBrief,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "RankedItem",
     "RecommendationResponse",
     "RefinementChip",
+    "ShoppingBrief",
 ]

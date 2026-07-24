@@ -17,7 +17,7 @@ The agent receives Microsoft Agent Framework's `OpenAIChatCompletionClient`; vLL
 
 RetailConcierge is one MAF `Agent` responsible for the complete user conversation:
 
-- call `extract_brief` first to produce a structured brief with application-side currency conversion and dimension parsing
+- call `extract_brief` first to produce a structured brief via LLM tool calling
 - ask only blocking clarification questions (capped at 2 per turn by the brief tool)
 - call `find_product_types` and `find_brands` to canonicalize names against the catalog
 - call `search_catalog` to retrieve BM25 candidates
@@ -29,7 +29,7 @@ The five MAF tools, in call order:
 
 | Tool | Description |
 |---|---|
-| `extract_brief` | Reasoning-only. Returns structured brief (intent, search_terms, product_type, brand, budget_usd converted from any currency, max_dimension_cm converted to cm, must_have, nice_to_have, color, material, compatibility, target_use, quantity, assumptions, evidence_gaps). Handles the two-question clarification budget. No database access — pure parsing in `use_cases/brief.py`. |
+| `extract_brief` | LLM args. Agent fills a `ShoppingBrief` Pydantic model (intent, search_terms, product_type, brand, budget_usd converted to USD, max_dimension_cm converted to cm, must_have, nice_to_have, color, material, compatibility, target_use, quantity, assumptions, evidence_gaps) via MAF tool calling. Tool body returns the validated brief dict. No database access, no offline parsing — the LLM owns field extraction. |
 | `find_product_types` | LIKE-match against the `product_type` column, ordered by listing count. |
 | `find_brands` | Three-tier brand resolution: exact prefix → FTS5 (stemming + close misspellings) → LIKE fallback. |
 | `search_catalog` | BM25 via FTS5, up to 50 candidates with optional product-type, brand, and dimension filters. Records observed `item_id` values into the session's `CatalogEvidenceTracker`. |
@@ -45,8 +45,9 @@ The five MAF tools, in call order:
                                         v
                    ┌──────────────────────────────────────────────┐
                    │           extract_brief                      │
-                   │  (structured brief + currency/dimension      │
-                   │   parsing + 2-question clarification budget) │
+                   │  (LLM fills ShoppingBrief via tool calling   │
+                   │   — currency / dimension / quantity          │
+                   │   conversion, assumptions, evidence gaps)    │
                    └─────────┬────────────────────┬───────────────┘
                              │                    │
                     complete=false          complete=true

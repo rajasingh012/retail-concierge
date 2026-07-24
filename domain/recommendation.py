@@ -16,12 +16,70 @@ Both are pure entities — no framework imports.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 MAX_RANKED_PRODUCTS = 5
-MAX_REFINEMENT_CHIPS = 4
+MAX_REFINEMENT_CHIPS = 5
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Normalize provider-emitted list-ish shapes to ``list[str]``.
+
+    Different providers encode the same intent multiple ways:
+
+    * a real list: ``["wireless earbuds"]``
+    * a JSON-Schema "array of strings" wrapped in ``{"item": [...]}``:
+      ``{"item": ["wireless earbuds"]}`` (some providers emit this when the
+      schema is described as ``{"type": "array", "items": {"type": "string"}}``
+      and the model collapses it to a single-element object)
+    * an empty string ``""`` (providers that default unfilled list fields to "")
+
+    Anything unrecognized is dropped. The result is always a ``list[str]``.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item) for item in value if isinstance(item, (str, int, float))]
+    if isinstance(value, dict):
+        # Common wrapper: {"item": [...]}. Unwrap anything that looks like
+        # a single list payload, regardless of the key name.
+        for candidate in value.values():
+            if isinstance(candidate, list):
+                return [str(item) for item in candidate if isinstance(item, (str, int, float))]
+            if isinstance(candidate, str) and candidate.strip():
+                return [candidate]
+        return []
+    return []
+
+
+def _coerce_search_terms(value: Any) -> str:
+    """Normalize ``search_terms`` to a single space-joined string.
+
+    Accepts a string, a list of strings, or a ``{"item": [...]}`` wrapper.
+    Empty / None / unrecognized shapes return ``""`` so the agent loop can
+    treat the absence as "no search terms — agent must derive them".
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if item]
+        return " ".join(parts)
+    if isinstance(value, dict):
+        for candidate in value.values():
+            if isinstance(candidate, list):
+                return _coerce_search_terms(candidate)
+            if isinstance(candidate, str):
+                return candidate.strip()
+    return ""
+
+
+_LStr = Annotated[list[str], BeforeValidator(_coerce_str_list)]
 
 
 class RefinementChip(BaseModel):
@@ -66,6 +124,100 @@ class RecommendationResponse(BaseModel):
         "This is an offline product catalog snapshot with typed dimensions, "
         "material, color, and brand metadata but no prices, ratings, or "
         "live availability."
+    )
+
+
+class ShoppingBrief(BaseModel):
+    """Structured shopping brief extracted from the user's request.
+
+    Used as the ``extract_brief`` tool's argument type. The agent fills it
+    in via MAF tool calling; the tool body packages it into a brief dict
+    the rest of the agent loop can consume. Constraints on numeric fields
+    encode the contract the LLM must respect — do not relax them without
+    also relaxing the matching ``search_catalog`` semantics.
+
+    List-shaped fields use ``BeforeValidator`` to accept the multiple
+    shapes providers emit (a list, a ``{"item": [...]}`` wrapper, or an
+    empty string). ``search_terms`` is normalized to a single string.
+    """
+
+    intent: str = Field(
+        description=(
+            "One sentence capturing what the user wants, in their voice. "
+            "Example: 'noise-cancelling wireless earbuds for commuting.'"
+        )
+    )
+    search_terms: Annotated[str, BeforeValidator(_coerce_search_terms)] = Field(
+        default="",
+        description=(
+            "Concrete catalog terms to feed search_catalog. Use the most "
+            "discriminating 2-4 words. Example: 'wireless earbuds noise cancelling'."
+        ),
+    )
+    product_type: str = Field(
+        default="",
+        description=(
+            "Canonical catalog product_type if the user implied one "
+            "(e.g. 'HEADPHONES', 'CHAIR'). Empty when not specified."
+        ),
+    )
+    brand: str = Field(
+        default="",
+        description="Stated brand. Empty when not specified or explicitly flexible.",
+    )
+    budget_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Budget converted to USD. 0 when not specified. Non-USD currencies "
+            "are converted at approximate market rates; note the source in assumptions."
+        ),
+    )
+    max_dimension_cm: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Maximum dimension in centimeters. 0 disables the dimension filter. "
+            "Used as a ceiling by search_catalog."
+        ),
+    )
+    quantity: int = Field(
+        default=1,
+        ge=1,
+        description="Quantity requested. 1 when unspecified.",
+    )
+    color: str = Field(default="", description="Stated color. Empty when not specified.")
+    material: str = Field(default="", description="Stated material. Empty when not specified.")
+    must_have: _LStr = Field(
+        default_factory=list,
+        description="Hard constraints the user stated; failure to meet any is blocking.",
+    )
+    nice_to_have: _LStr = Field(
+        default_factory=list,
+        description="Soft preferences; missing them does not block results.",
+    )
+    compatibility: str = Field(
+        default="",
+        description="Stated compatibility requirement (e.g. 'iPhone 15', 'ThinkPad T14').",
+    )
+    target_use: str = Field(
+        default="",
+        description="Where or how the product will be used (e.g. 'home office', 'commuting').",
+    )
+    assumptions: _LStr = Field(
+        default_factory=list,
+        description=(
+            "Reasoning notes the agent made to fill the brief (e.g. \"2 = pair of "
+            "earbuds\", \"15000 INR converted to ~180 USD at 0.012\"). Forwarded "
+            "to the user as the brief's assumption section."
+        ),
+    )
+    evidence_gaps: _LStr = Field(
+        default_factory=list,
+        description=(
+            "Parts of the brief that are weak or guessed (e.g. 'budget was "
+            "stated in INR with no clear USD reference rate')."
+        ),
     )
 
 
@@ -133,6 +285,7 @@ __all__ = [
     "RefinementChip",
     "RankedItem",
     "RecommendationResponse",
+    "ShoppingBrief",
     "FinalizedCandidate",
     "extract_json_object",
 ]

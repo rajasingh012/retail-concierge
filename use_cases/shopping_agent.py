@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import threading
 from collections import OrderedDict
-from typing import Any
+from typing import Annotated, Any
 
 from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatCompletionClient
+from pydantic import Field
 
 from infrastructure.chat_clients import provider_extras
 
@@ -17,17 +18,12 @@ from domain.recommendation import (
     RankedItem,
     RecommendationResponse,
     RefinementChip,
+    ShoppingBrief,
     extract_json_object,
-)
-from use_cases.brief import (
-    EXTRACT_BRIEF_TOOL,
-    _extract_budget_usd,
-    _extract_dimensions,
-    _extract_quantity,
-    _make_budget_note,
 )
 from use_cases.ranking import screen_and_rank_candidates
 
+EXTRACT_BRIEF_TOOL = "extract_brief"
 FINALIZE_RECOMMENDATIONS_TOOL = "finalize_recommendations"
 
 SHOPPING_AGENT_INSTRUCTIONS = """\
@@ -46,8 +42,8 @@ Conversation:
 - Treat a user's next message as the answer or refinement to the current request.
 
 Catalog workflow:
-0. Call extract_brief first to produce a structured shopping brief. It handles
-   budget currency conversion, dimension parsing, and the two-question budget.
+0. Call extract_brief first, passing a fully populated brief argument. The
+   brief is the single source of truth for the rest of the turn.
 1. Call find_product_types only when an exact catalog product_type will
    materially narrow retrieval.
 2. Call find_brands to resolve brand names against the catalog.
@@ -67,6 +63,44 @@ Catalog workflow:
 7. Use only the candidates and exact order returned by finalize_recommendations.
    You may omit a candidate that contradicts an explicit must-have, but never
    restore an excluded item, add an unknown item, or reorder the result.
+
+Brief extraction rules:
+- intent: one sentence in the user's voice, what they want.
+- search_terms: 2-4 concrete catalog terms, most discriminating first.
+- product_type / brand / color / material / compatibility / target_use: empty
+  string when the user did not specify. Never guess.
+- budget_usd: convert to USD. Record the source currency and the conversion
+  rate you used in assumptions.
+- max_dimension_cm: convert to centimeters. 0 means no ceiling.
+- quantity: 1 when unspecified. "pair" -> 2, "dozen" -> 12. Keep
+  "set"/"pack"/"bundle" as 1 unless the user said a number.
+- must_have: hard constraints the user stated. Failure to meet any is blocking.
+- nice_to_have: soft preferences; missing them does not block results.
+- assumptions: reasoning notes (e.g. "considered 200 EUR ~ 216 USD at 1.08").
+- evidence_gaps: parts of the brief that are weak or guessed.
+
+Brief extraction examples:
+- "a pair of wireless earbuds under 5k rupees"
+  intent="wireless earbuds for a pair, budget around 5k rupees",
+  search_terms="wireless earbuds", product_type="HEADPHONES",
+  budget_usd=60.0, quantity=2,
+  assumptions=["15000 INR converted to ~60 USD at 0.012"],
+  evidence_gaps=["no stated brand or color; listener must accept any"].
+- "noise-cancelling headphones for open-plan office"
+  intent="noise-cancelling headphones for an open-plan office",
+  search_terms="noise cancelling headphones", product_type="HEADPHONES",
+  target_use="open-plan office",
+  nice_to_have=["noise_cancelling"],
+  evidence_gaps=["budget not specified; showing full price range"].
+- "I want a black one"
+  intent="the previously discussed product, in black",
+  search_terms="<previous product terms>", color="black",
+  evidence_gaps=["no product_type restated; relying on session context"].
+- "around $200, maybe a bit more"
+  intent="product around $200, flexible upward",
+  search_terms="<from the rest of the request>", budget_usd=200.0,
+  assumptions=["$200 is a target, not a hard ceiling"],
+  evidence_gaps=["no hard ceiling stated"].
 
 Final response:
 - For a clarification, respond with only the natural-language question. Do not
@@ -200,96 +234,42 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker):
 
 
 def _make_extract_brief_tool():
-    """Build the structured brief extraction tool."""
+    """Build the structured brief extraction tool.
+
+    The tool's argument is the ShoppingBrief Pydantic model. MAF exposes the
+    schema to the model, the agent fills in the fields via tool calling, and
+    MAF passes the parsed JSON back to the tool body as a plain dict. The
+    tool body re-validates the dict through ShoppingBrief so the canonical
+    typed model is the single source of truth, then returns ``model_dump()``.
+    """
 
     @tool(
         name=EXTRACT_BRIEF_TOOL,
         description=(
             "Extract a structured shopping brief from the user's request. "
-            "Call this once before any catalog search tool. Handles budget currency "
-            "conversion, dimension parsing, quantity, and the two-question "
-            "clarification budget. Returns a canonical brief dict with parsed fields, "
-            "assumptions, and evidence gaps."
+            "Call this once, before any catalog search tool. The argument "
+            "is the full brief; convert any budget to USD, any dimension "
+            "to centimeters, and any quantity word ('pair', 'dozen') to a "
+            "number. Leave fields empty when the user did not specify them; "
+            "do not invent product_type, brand, color, or material. Record "
+            "non-obvious reasoning in assumptions and uncertainty in "
+            "evidence_gaps."
         ),
     )
     def extract_brief(
-        user_request: str,
-        clarifications: list[dict[str, str]] = [],
-        remaining_clarification_budget: int = 2,
+        brief: Annotated[
+            dict[str, Any],
+            Field(description="Structured shopping brief extracted from the user's request."),
+        ],
     ) -> dict[str, Any]:
-        """Extract a structured shopping brief from the user request.
-
-        Args:
-            user_request: The user's original or refined shopping request.
-            clarifications: Previous Q&A pairs as [{"q": "...", "a": "..."}].
-                Passed from the caller so the agent can reference them.
-            remaining_clarification_budget: How many more questions can be asked
-                this turn. 0 forces the brief to complete with best assumptions.
-
-        Returns:
-            A dict with either:
-              {"complete": false, "question": "..."}
-            or
-              {"complete": true, "brief": {...}}
-              where brief contains intent, search_terms, product_type, brand,
-              budget_usd, budget_source, dimensions, must_have, nice_to_have,
-              color, material, compatibility, target_use, quantity, assumptions,
-              evidence_gaps, budget_notes, dimension_notes.
-        """
-        return _build_brief_response(user_request, clarifications, remaining_clarification_budget)
+        """Validate the brief through ShoppingBrief and return the canonical dict."""
+        # MAF passes the parsed JSON dict (not a Pydantic model) to the tool
+        # body. Re-validate so the canonical typed model is the single source
+        # of truth; reject shape/constraint violations back to the model.
+        validated = ShoppingBrief.model_validate(brief)
+        return validated.model_dump()
 
     return extract_brief
-
-
-def _build_brief_response(
-    user_request: str,
-    clarifications: list[dict[str, str]],
-    remaining_budget: int,
-) -> dict[str, Any]:
-    """Build the brief response with application-side parsing applied.
-
-    This is a pure-data helper (no LLM call) that constructs the brief
-    structure. The actual extraction of semantic fields from the request
-    happens in the model's response when it calls this tool.
-    """
-    budget_usd, budget_source = _extract_budget_usd(user_request)
-    dimensions, dim_note = _extract_dimensions(user_request)
-    quantity = _extract_quantity(user_request)
-    budget_notes = _make_budget_note(user_request, budget_usd, budget_source)
-
-    assumption_prompts = []
-    if budget_notes:
-        assumption_prompts.extend(budget_notes)
-    if dim_note:
-        assumption_prompts.append(dim_note)
-
-    brief = {
-        "intent": "",
-        "search_terms": "",
-        "product_type": "",
-        "brand": "",
-        "budget_usd": budget_usd,
-        "budget_source": budget_source,
-        "max_dimension_cm": dimensions,
-        "must_have": [],
-        "nice_to_have": [],
-        "color": "",
-        "material": "",
-        "compatibility": "",
-        "target_use": "",
-        "quantity": quantity,
-        "assumptions": [],
-        "evidence_gaps": [],
-        "budget_notes": budget_notes,
-        "dimension_notes": dim_note,
-    }
-
-    return {
-        "complete": True,
-        "brief": brief,
-        "clarifications_asked": len(clarifications),
-        "clarification_budget_remaining": max(0, remaining_budget - len(clarifications)),
-    }
 
 
 def structured_recommendation_from_response(response: Any) -> RecommendationResponse | None:
