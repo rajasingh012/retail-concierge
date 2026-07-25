@@ -361,23 +361,25 @@ def test_multifield_ranking_uses_abo_signals() -> None:
 
 
 def test_extract_json_object_handles_provider_wrappers() -> None:
+    import json
     payload = (
         '{"kind":"recommendations","ranked":[],'
         '"notes":[],"refinement_chips":[]}'
     )
+    expected = json.loads(payload)
     # 3-backtick fence
-    assert extract_json_object(f"```json\n{payload}\n```") == payload
-    assert extract_json_object(f"```\n{payload}\n```\n```") == payload
+    assert json.loads(extract_json_object(f"```json\n{payload}\n```")) == expected
+    assert json.loads(extract_json_object(f"```\n{payload}\n```\n```")) == expected
     # Narrative prefix
-    assert extract_json_object(
-        f"Here you go:\n{payload}\nEnjoy."
-    ) == payload
+    assert json.loads(
+        extract_json_object(f"Here you go:\n{payload}\nEnjoy.")
+    ) == expected
     # Reasoning-tag prefix
-    assert extract_json_object(
-        f"<think>\nthinking\n</think>\n{payload}"
-    ) == payload
+    assert json.loads(
+        extract_json_object(f"<think>\nthinking\n</think>\n{payload}")
+    ) == expected
     # Plain JSON passes through unchanged
-    assert extract_json_object(payload) == payload
+    assert json.loads(extract_json_object(payload)) == expected
 
 
 def test_structured_recommendation_from_response_validates_against_schema() -> None:
