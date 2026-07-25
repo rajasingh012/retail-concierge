@@ -34,7 +34,15 @@ _OPENAI_COMPLETIONS_CREATE_KWARGS: frozenset[str] = frozenset(
 # side are silently ignored, so a MiniMax-only extra on vLLM is a no-op.
 PROVIDERS: dict[str, tuple[str, str | None, dict[str, Any]]] = {
     "vllm":     ("http://localhost:8000/v1", None, {}),
-    "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", {}),
+    "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", {
+        # Disable thinking for contract turns. DeepSeek defaults to thinking
+        # enabled with effort "high". When thinking is enabled and the agent
+        # performs tool calls, `reasoning_content` must be forwarded in every
+        # subsequent turn or the API returns 400. Disabling thinking avoids
+        # this MAF-compatibility issue entirely.
+        "thinking": {"type": "disabled"},
+        "max_completion_tokens": 8192,
+    }),
     # MiniMax-M3 puts `<think>...</think>` blocks inside `content` by default.
     # `reasoning_split=True` routes them into a separate `reasoning_details`
     # field, leaving the agent's JSON contract unwrapped in `content`.
