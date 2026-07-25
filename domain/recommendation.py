@@ -5,7 +5,7 @@ Two contracts:
 * ``RecommendationResponse`` is the agent-level ``response_format``. MAF enforces
   this through provider-native JSON schema when available (OpenAI, vLLM) and
   falls back to prompt-side instructions + parser for other providers
-  (MiniMax, DeepSeek, etc.). Read it from ``AgentResponse.value``.
+  (DeepSeek, etc.). Read it from ``AgentResponse.value``.
 
 * ``FinalizedCandidate`` is the typed return of the ``finalize_recommendations``
   tool. MAF serializes Pydantic returns through ``model_dump()`` into the

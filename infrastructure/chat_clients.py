@@ -2,12 +2,12 @@
 
 Uses Microsoft Agent Framework's `OpenAIChatCompletionClient`, which natively
 speaks the OpenAI Chat Completions wire protocol. All providers (vLLM, DeepSeek,
-MiniMax) expose this endpoint, so swapping backends is just a `base_url` change.
+DeepSeek) expose this endpoint, so swapping backends is just a `base_url` change.
 
 Provider presets:
     vllm     → AMD Developer Cloud MI300X, default base http://localhost:8000/v1
     deepseek → cloud API, https://api.deepseek.com/v1
-    minimax  → cloud API, https://api.minimax.io/v1
+    deepseek → cloud API, https://api.deepseek.com/v1
 
 Adding a provider = one entry in PROVIDERS below.
 """
@@ -29,9 +29,9 @@ _OPENAI_COMPLETIONS_CREATE_KWARGS: frozenset[str] = frozenset(
 # Each entry: (default_base_url, env_var_for_api_key, per-request extras).
 # `extras` are merged into every chat-completion request via the OpenAI SDK's
 # `extra_body` — a documented escape hatch for provider-specific fields that
-# don't exist on the OpenAI type stubs (e.g. ``reasoning_split`` for MiniMax,
+# don't exist on the OpenAI type stubs (e.g. ``thinking`` for DeepSeek,
 # custom sampling params on local vLLM builds). Unknown fields on the server
-# side are silently ignored, so a MiniMax-only extra on vLLM is a no-op.
+# side are silently ignored, so a provider-only extra on another provider is a no-op.
 PROVIDERS: dict[str, tuple[str, str | None, dict[str, Any]]] = {
     "vllm":     ("http://localhost:8000/v1", None, {}),
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", {
@@ -43,16 +43,7 @@ PROVIDERS: dict[str, tuple[str, str | None, dict[str, Any]]] = {
         "thinking": {"type": "disabled"},
         "max_completion_tokens": 8192,
     }),
-    # MiniMax-M3 puts `<think>...</think>` blocks inside `content` by default.
-    # `reasoning_split=True` routes them into a separate `reasoning_details`
-    # field, leaving the agent's JSON contract unwrapped in `content`.
-    # `max_completion_tokens` is the docs-recommended length cap; default is
-    # conservative and the agent's reasoning plus JSON contract needs more.
-    "minimax":  (
-        "https://api.minimax.io/v1",
-        "MINIMAX_API_KEY",
-        {"reasoning_split": True, "max_completion_tokens": 8192},
-    ),
+
 }
 
 
@@ -91,7 +82,7 @@ def provider_extras(provider: str) -> dict[str, Any]:
 
     Read by callers (e.g. ``use_cases.shopping_agent``) so the agent's
     ``default_options`` can include provider-specific fields without
-    hard-coding MiniMax names. Unknown extras on a different provider are
+    hard-coding provider names. Unknown extras on a different provider are
     forwarded and silently ignored by the server.
     """
     try:

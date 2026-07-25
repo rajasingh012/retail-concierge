@@ -179,8 +179,8 @@ def build_shopping_agent(
         client: MAF OpenAI-compatible chat client.
         catalog_tools: Search / brand / product-type tools.
         tracker: Evidence tracker shared between catalog and finalizer tools.
-        provider: Provider name (``"minimax"``, ``"vllm"``, ``"deepseek"``).
-            Provider-specific request extras (e.g. MiniMax
+        provider: Provider name (``"deepseek"``, ``"vllm"``, etc.).
+            Provider-specific request extras (e.g. DeepSeek
             ``reasoning_split``) are looked up via ``provider_extras`` and
             merged into ``default_options``. Unknown extras on a different
             provider are forwarded in ``extra_body`` and silently ignored
@@ -290,7 +290,7 @@ def structured_recommendation_from_response(response: Any) -> RecommendationResp
     Tries ``response.value`` first (provider-native JSON-schema enforcement,
     e.g. vLLM and OpenAI). Falls back to extracting the JSON object from
     ``response.text`` and validating against the schema — for providers
-    (MiniMax, DeepSeek) that deliver wrapped or narrated output instead.
+    (e.g. DeepSeek) that deliver wrapped or narrated output instead.
     """
     try:
         value = getattr(response, "value", None)

@@ -16,7 +16,7 @@ uv sync
 # Build the ABO catalog (requires the abo-listings.tar.gz dataset)
 uv run python scripts/import_catalog.py --shards data/abo/listings/
 
-# Default: MiniMax-M3 (set MINIMAX_API_KEY in your environment)
+# Default: DeepSeek V4 Flash (set DEEPSEEK_API_KEY in your environment)
 uv run python main.py
 
 # AMD MI300X (vLLM with Gemma 4)

@@ -22,8 +22,8 @@ from use_cases.shopping_agent import (
     structured_recommendation_from_response,
 )
 
-DEFAULT_PROVIDER = "minimax"
-DEFAULT_MODEL = "MiniMax-M3"
+DEFAULT_PROVIDER = "deepseek"
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_DB = Path("./retail_catalog.db")
 
 
