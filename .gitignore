@@ -1,5 +1,12 @@
 # Generated catalog database
 retail_catalog.db
+*.bak
+*.bak2
+
+# Probe runtime artifacts
+data/dead_candidates.log
+data/probe_state.json
+data/needs_human_attention.txt
 
 # Benchmark output
 bench/results/
