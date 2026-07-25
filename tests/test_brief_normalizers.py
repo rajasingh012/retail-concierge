@@ -96,8 +96,8 @@ def test_search_terms_accepts_empty_string() -> None:
     assert b.search_terms == ""
 
 
-def test_normalizers_observed_in_minimax_run() -> None:
-    """Exact shapes observed in the 5-query harness against MiniMax-M3."""
+def test_normalizers_observed_in_production_run() -> None:
+    """Exact shapes observed in the 5-query harness."""
     # Query 1: search_terms emitted as a list, nice_to_have as ""
     b = ShoppingBrief.model_validate({
         "intent": "wireless earbuds for a pair, budget around 5k rupees",
