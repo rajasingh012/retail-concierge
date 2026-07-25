@@ -63,6 +63,10 @@ Catalog workflow:
 7. Use only the candidates and exact order returned by finalize_recommendations.
    You may omit a candidate that contradicts an explicit must-have, but never
    restore an excluded item, add an unknown item, or reorder the result.
+8. After calling finalize_recommendations, your ENTIRE response MUST be a single
+   JSON object. No introductory text, no thinking, no reasoning, no markdown,
+   no code fences. Just the raw JSON object starting with { and ending with }.
+   The JSON schema is specified below in "Final response".
 
 Brief extraction rules:
 - intent: one sentence in the user's voice, what they want.
