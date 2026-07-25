@@ -251,9 +251,17 @@ def extract_json_object(text: str) -> str:
     MAF's structured-response parser requires pure JSON; many models wrap the
     payload in ````` or ```json``` fences, prefix `````` blocks, or
     narrate around the JSON. This helper strips that noise and returns a
-    substring MAF can validate. Returns the original text when no `{` is
-    present so callers can fall back to the framework's error path.
+    substring MAF can validate. Returns the original text when no JSON object
+    can be located so callers can fall back to the framework's error path.
+
+    Uses :mod:`json_repair` to recover from common LLM malformation: missing
+    outer braces (e.g. ````json kind":"..." ````), unescaped quotes, trailing
+    commas, partial truncation, and prose wrapping. Fence-stripping stays
+    local so we don't hand ``json_repair`` a payload that has a fence glued
+    to the JSON content.
     """
+    import json_repair
+
     candidate = text.strip()
     if candidate.startswith("```"):
         # Strip any number of leading fence lines, and any trailing fence lines.
@@ -264,18 +272,24 @@ def extract_json_object(text: str) -> str:
         while lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
         candidate = "\n".join(lines).strip()
-    for start, ch in enumerate(candidate):
-        if ch != "{":
-            continue
-        depth = 0
-        for end in range(start, len(candidate)):
-            c = candidate[end]
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return candidate[start : end + 1]
+    import json
+    try:
+        parsed = json_repair.loads(candidate)
+    except Exception:
+        return text
+    if isinstance(parsed, dict):
+        return json.dumps(parsed)
+    # If the JSON started with a key-value pair instead of `{`, the model
+    # likely emitted ````json kind":"..." ``` and the fence strip ate the
+    # opening brace. json_repair interpreted the lone key-value pair as an
+    # array element. Re-parse with a prepended brace before falling back.
+    if not candidate.startswith("{"):
+        try:
+            parsed = json_repair.loads("{" + candidate)
+        except Exception:
+            return text
+        if isinstance(parsed, dict):
+            return json.dumps(parsed)
     return text
 
 
