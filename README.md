@@ -35,3 +35,15 @@ RETAIL_PROVIDER=deepseek RETAIL_MODEL=deepseek-chat uv run python main.py
 - [architecture.md](architecture.md) — current design and data flow
 - [deploy.md](deploy.md) — catalog, inference, and benchmark commands
 - [progress.md](progress.md) — forward-looking work
+
+## Hackathon: AMD AI DevMaster 2026
+
+Submitted to **Track 2: Agentic AI** — reasoning, planning, tool use, memory, RAG, multi-agent systems. Local inference on AMD Radeon GPUs is a judging requirement.
+
+- **Repo:** https://github.com/AMD-DEV-CONTEST/Radeon-hackathon-2026-07
+- **Deadline:** Aug 6, 2026 (PDT 8:59 AM, CEST 5:59 PM, UTC+8 11:59 PM)
+- **Prize pool:** $30,000 USD (1st $5K / 2nd $3.5K / 3rd $1.5K)
+- **Eligibility:** AMD AI Developer Program membership required before joining the event
+- **Submit requirements:** local inference on Radeon GPUs, inference speed optimization, functional completeness, agentic UX
+- **Discord:** https://discord.gg/zt9caur5B3
+- **Contact:** ai_dev_contests@amd.com

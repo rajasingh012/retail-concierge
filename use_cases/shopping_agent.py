@@ -66,7 +66,8 @@ Catalog workflow:
 
 Brief extraction rules:
 - intent: one sentence in the user's voice, what they want.
-- search_terms: 2-4 concrete catalog terms, most discriminating first.
+- search_terms: 2-4 concrete catalog terms, most discriminating first. Terms
+  MUST be drawn from the user's words; do not invent terms the user did not say.
 - product_type / brand / color / material / compatibility / target_use: empty
   string when the user did not specify. Never guess.
 - budget_usd: convert to USD. Record the source currency and the conversion
