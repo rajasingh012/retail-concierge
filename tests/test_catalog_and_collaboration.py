@@ -367,7 +367,6 @@ def test_extract_json_object_handles_provider_wrappers() -> None:
     )
     # 3-backtick fence
     assert extract_json_object(f"```json\n{payload}\n```") == payload
-    # 4-backtick fence (observed from MiniMax-M3)
     assert extract_json_object(f"```\n{payload}\n```\n```") == payload
     # Narrative prefix
     assert extract_json_object(

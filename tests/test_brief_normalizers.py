@@ -1,9 +1,8 @@
 """Tests for the provider-shape coercion in ``ShoppingBrief``.
 
-These cover the real shapes different providers emit (observed in
-integration runs against MiniMax-M3) and assert that the
-``BeforeValidator`` normalizers produce a canonical ``list[str]`` for
-list fields and a single string for ``search_terms``.
+These cover the real shapes different providers emit and assert that
+the ``BeforeValidator`` normalizers produce a canonical ``list[str]``
+for list fields and a single string for ``search_terms``.
 
 The validators accept a wider shape than the constructor's static type,
 so the tests use ``model_validate`` (the dynamic API) and avoid the

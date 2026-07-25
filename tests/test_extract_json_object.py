@@ -1,9 +1,6 @@
 """Tests for the JSON extraction helper used by the recommendation fallback.
 
-These tests cover the failure modes that the original balanced-brace scan
-missed against MiniMax-M3 output, captured in the 5-query bench log on
-2026-07-25 against the real API. The harness payloads are the source of
-truth here, not synthetic cases.
+The harness payloads are the source of truth here, not synthetic cases.
 """
 from __future__ import annotations
 
@@ -30,12 +27,9 @@ def test_extract_json_object_handles_fenced_with_braces() -> None:
 
 def test_extract_json_object_handles_missing_outer_brace() -> None:
     """The exact Q1 failure mode: fence-strip ate the opening brace.
-
-    Real output from Query 1 of the 5-query bench log against MiniMax-M3.
-    The model emitted the JSON inside a ```json fence but the opening brace
-    was on the same line as the fence opener, so the previous fence-strip
-    left ``kind":"..."`` and the balanced-brace scan returned the inner
-    ranked[0] object instead of the schema envelope.
+    The model emitted the JSON inside a ```json fence with the opening
+    brace on the same line as the fence opener, leaving ``kind":"..."``
+    and the balanced-brace scan returned the inner ranked[0] object.
     """
     text = (
         "```json\n"
