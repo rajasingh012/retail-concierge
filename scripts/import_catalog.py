@@ -34,11 +34,7 @@ def _read_shards(archive_root: Path) -> Iterable[dict]:
 
 
 def _product_url(item_id: str, marketplace: str, country: str) -> str:
-    if marketplace:
-        return f"https://www.{marketplace}/dp/{item_id}"
-    digest = hashlib.sha1(item_id.encode("utf-8")).hexdigest()[:8]
-    suffix = f"amazon.{country.lower()}" if country else "amazon"
-    return f"https://www.{suffix}/dp/{item_id}?ref=abo#{digest}"
+    return f"https://www.amazon.com/dp/{item_id}"
 
 
 def _first_product_type(product_type) -> str | None:

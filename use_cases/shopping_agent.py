@@ -65,8 +65,7 @@ Brief extraction rules:
   MUST be drawn from the user's words; do not invent terms the user did not say.
 - product_type / brand / color / material / compatibility / target_use: empty
   string when the user did not specify. Never guess.
-- budget_usd: convert to USD. Record the source currency and the conversion
-  rate you used in assumptions.
+- budget_usd: stated budget in USD. 0 when unspecified.
 - max_dimension_cm: convert to centimeters. 0 means no ceiling.
 - quantity: 1 when unspecified. "pair" -> 2, "dozen" -> 12. Keep
   "set"/"pack"/"bundle" as 1 unless the user said a number.
@@ -76,11 +75,10 @@ Brief extraction rules:
 - evidence_gaps: parts of the brief that are weak or guessed.
 
 Brief extraction examples:
-- "a pair of wireless earbuds under 5k rupees"
-  intent="wireless earbuds for a pair, budget around 5k rupees",
+- "a pair of wireless earbuds under $60"
+  intent="wireless earbuds for a pair, budget around $60",
   search_terms="wireless earbuds", product_type="HEADPHONES",
   budget_usd=60.0, quantity=2,
-  assumptions=["5000 INR converted to ~60 USD at 0.012"],
   evidence_gaps=["no stated brand or color; listener must accept any"].
 - "noise-cancelling headphones for open-plan office"
   intent="noise-cancelling headphones for an open-plan office",
