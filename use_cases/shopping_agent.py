@@ -188,14 +188,25 @@ def build_shopping_agent(
     """
     tracker = tracker or CatalogEvidenceTracker()
     provider_options = provider_extras(provider) if provider else {}
+    # DeepSeek API does not accept `json_schema` response_format (400 error),
+    # and `json_object` mode is incompatible with tool calling (silently
+    # disables them). Omitting response_format entirely lets the model use
+    # tools freely; the extended prompt instructions + json-repair safety
+    # net ensure reliable JSON extraction from the final content.
+    response_format = (
+        None
+        if provider == "deepseek"
+        else RecommendationResponse
+    )
+    if response_format is None:
+        default_options = dict(provider_options)
+    else:
+        default_options = {"response_format": response_format, **provider_options}
     return Agent(
         client=client,
         instructions=SHOPPING_AGENT_INSTRUCTIONS,
         tools=_build_agent_tools(catalog_tools, tracker=tracker),
-        default_options={
-            "response_format": RecommendationResponse,
-            **provider_options,
-        },
+        default_options=default_options,
     )
 
 
