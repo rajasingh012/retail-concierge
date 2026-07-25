@@ -24,8 +24,7 @@ CREATE TABLE listings (
     has_dimensions    INTEGER NOT NULL CHECK (has_dimensions IN (0, 1)),
     has_weight        INTEGER NOT NULL CHECK (has_weight IN (0, 1)),
     has_material      INTEGER NOT NULL CHECK (has_material IN (0, 1)),
-    product_url       TEXT NOT NULL UNIQUE,
-    url_active        INTEGER NOT NULL DEFAULT 1 CHECK (url_active IN (0, 1))
+    product_url       TEXT NOT NULL UNIQUE
 );
 """
 
@@ -151,24 +150,6 @@ def create_schema(conn: sqlite3.Connection, *, rebuild_fts: bool = False) -> Non
     conn.commit()
 
 
-def migrate(conn: sqlite3.Connection) -> None:
-    """Idempotent in-place upgrades for the listings schema.
-
-    Safe to call on every startup: each step checks current state first.
-    """
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(listings)").fetchall()}
-    if "url_active" not in cols:
-        conn.execute(
-            "ALTER TABLE listings ADD COLUMN url_active INTEGER "
-            "NOT NULL DEFAULT 1 CHECK (url_active IN (0, 1))"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_listings_url_active "
-            "ON listings(url_active)"
-        )
-        conn.commit()
-
-
 class ABOCatalogRepository:
     """Read-only catalog queries over the imported ABO listings."""
 
@@ -185,7 +166,6 @@ class ABOCatalogRepository:
             )
         else:
             self._conn = sqlite3.connect(str(path), check_same_thread=False)
-            migrate(self._conn)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
 
@@ -320,8 +300,6 @@ class ABOCatalogRepository:
             from_sql = "FROM listings AS l"
             order_sql = "ORDER BY l.id"
 
-        where.append("l.url_active = 1")
-
         if product_type:
             where.append("l.product_type = ?")
             params.append(product_type)
@@ -345,7 +323,7 @@ class ABOCatalogRepository:
             SELECT l.item_id, l.marketplace, l.country, l.product_type,
                    l.title_en, l.brand_en, l.main_image_id,
                    l.has_bullet, l.has_dimensions, l.has_weight, l.has_material,
-                   l.product_url, l.url_active
+                   l.product_url
             {from_sql}
             WHERE {' AND '.join(where)}
             {order_sql}
@@ -376,56 +354,12 @@ class ABOCatalogRepository:
             """
             SELECT
                 (SELECT COUNT(*) FROM listings) AS listings,
-                (SELECT COUNT(*) FROM listings WHERE url_active = 1) AS listings_active,
-                (SELECT COUNT(*) FROM listings WHERE url_active = 0) AS listings_inactive,
                 (SELECT COUNT(DISTINCT product_type) FROM listings) AS product_types,
                 (SELECT COUNT(*) FROM listing_dimensions) AS dimensions,
                 (SELECT COUNT(*) FROM listing_text_values) AS text_values
             """
         ).fetchone()
         return dict(row)
-
-    def mark_url_inactive(self, item_ids: list[str]) -> int:
-        """Soft-delete listings by item_id. Returns the row count flipped."""
-        if not item_ids:
-            return 0
-        placeholders = ",".join("?" * len(item_ids))
-        cur = self._conn.execute(
-            f"UPDATE listings SET url_active = 0 WHERE item_id IN ({placeholders})",
-            item_ids,
-        )
-        self._conn.commit()
-        return cur.rowcount
-
-    def mark_url_active(self, item_ids: list[str]) -> int:
-        """Restore previously soft-deleted listings. Returns the row count flipped."""
-        if not item_ids:
-            return 0
-        placeholders = ",".join("?" * len(item_ids))
-        cur = self._conn.execute(
-            f"UPDATE listings SET url_active = 1 WHERE item_id IN ({placeholders})",
-            item_ids,
-        )
-        self._conn.commit()
-        return cur.rowcount
-
-    def iter_product_urls(self, *, product_type: str = "", only_active: bool = False) -> list[tuple[str, str]]:
-        """Yield (item_id, product_url) for probing. If product_type set, scope to it."""
-        clauses = ["product_url LIKE 'http%'"]
-        params: list[object] = []
-        if only_active:
-            clauses.append("url_active = 1")
-        if product_type:
-            clauses.append("product_type = ?")
-            params.append(product_type)
-        where = " AND ".join(clauses)
-        return [
-            (row[0], row[1])
-            for row in self._conn.execute(
-                f"SELECT item_id, product_url FROM listings WHERE {where} ORDER BY id",
-                params,
-            ).fetchall()
-        ]
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
