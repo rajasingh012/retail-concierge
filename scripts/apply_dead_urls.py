@@ -1,12 +1,11 @@
-"""Apply manually-confirmed dead URLs to url_active=0.
+"""Mark listings as verified-active after you've confirmed them in Firefox.
 
-Workflow:
-  1. Cron logs new candidates to data/dead_candidates.log
-     (format: date,item_id,asin,outcome,status,url)
-  2. You open each URL in Firefox, confirm it's truly 404
-  3. List the confirmed asins below (or via --asins a b c)
-  4. Run this script; it flips url_active=0 for those listings
-  5. To restore later: --restore --asins <...>
+Verify-alive model: url_active=1 means "a real browser session saw a real
+product page here." This script flips 0→1 for ASINs you've personally checked.
+
+Common workflows:
+  - Pre-demo: pull a random sample, open each in Firefox, mark the keepers.
+  - Post-cron: review data/dead_candidates.log, restore any false positives.
 """
 
 from __future__ import annotations
@@ -23,44 +22,42 @@ from infrastructure.database import ABOCatalogRepository
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="./retail_catalog.db")
-    parser.add_argument("--asins", nargs="+", default=[], help="ASINs to flip")
-    parser.add_argument("--restore", action="store_true", help="set url_active=1 instead")
-    parser.add_argument("--list", action="store_true", help="print candidates that are still url_active=1")
+    parser.add_argument("--asins", nargs="+", default=[], help="ASINs to mark active")
+    parser.add_argument("--deactivate", action="store_true",
+                        help="Reverse: set url_active=0 (mark dead)")
+    parser.add_argument("--sample", type=int, default=0,
+                        help="Print N random inactive ASINs with their URLs")
+    parser.add_argument("--product-type", default="",
+                        help="Filter --sample to a single product_type")
     args = parser.parse_args()
 
     repo = ABOCatalogRepository(args.db, read_only=False)
 
-    if args.list:
-        log = Path("data/dead_candidates.log")
-        if not log.exists():
-            print("No dead_candidates.log found.")
-            return 1
-        seen = {}
-        for line in log.read_text().splitlines():
-            parts = line.split(",")
-            if len(parts) < 6:
-                continue
-            asin = parts[2]
-            seen[asin] = parts[5]
-        # Print only those still url_active=1 (not yet flipped)
-        for asin, url in seen.items():
-            r = repo._conn.execute(
-                "SELECT url_active FROM listings WHERE item_id=?", (asin,)
-            ).fetchone()
-            if r and r[0] == 1:
-                print(f"  {asin}  {url}")
+    if args.sample:
+        # Print random inactive rows for manual Firefox verification
+        sql = "SELECT item_id, product_type, product_url FROM listings WHERE url_active=0"
+        params: list[object] = []
+        if args.product_type:
+            sql += " AND product_type=?"
+            params.append(args.product_type)
+        rows = repo._conn.execute(sql, params).fetchall()
+        import random
+        random.shuffle(rows)
+        for r in rows[: args.sample]:
+            print(f"  {r[0]}  [{r[1]}]  {r[2]}")
+        print(f"\n(Showing {min(args.sample, len(rows))} of {len(rows)} inactive rows)")
         return 0
 
     if not args.asins:
-        print("Pass --asins B07NRWJPGT B0XXXX ... or --list to view unconfirmed candidates.")
+        print("Pass --asins B0XXX B0YYY ... or --sample N to list inactive rows.")
         return 1
 
-    if args.restore:
-        n = repo.mark_url_active(args.asins)
-        print(f"Restored {n} listings to url_active=1")
-    else:
+    if args.deactivate:
         n = repo.mark_url_inactive(args.asins)
-        print(f"Marked {n} listings as url_active=0")
+        print(f"Deactivated {n} listings (url_active=0)")
+    else:
+        n = repo.mark_url_active(args.asins)
+        print(f"Activated {n} listings (url_active=1)")
     return 0
 
 
