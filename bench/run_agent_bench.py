@@ -179,9 +179,9 @@ def cli() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--turns", type=int, default=5)
     parser.add_argument("--database", type=Path, default=Path("retail_catalog.db"))
-    parser.add_argument("--provider", default=os.getenv("RETAIL_PROVIDER", "vllm"))
+    parser.add_argument("--provider", default=os.getenv("RETAIL_PROVIDER", "deepseek"))
     parser.add_argument(
-        "--model", default=os.getenv("RETAIL_MODEL", "google/gemma-3-27b-it")
+        "--model", default=os.getenv("RETAIL_MODEL", "deepseek-v4-flash")
     )
     asyncio.run(run_benchmark(parser.parse_args()))
 
