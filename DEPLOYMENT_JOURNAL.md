@@ -98,17 +98,38 @@ VRAM Total Used Memory (B): 187672973312   ← ~175 GB leaked
 
 **Fix:** Extended grep regex to match both patterns.
 
-**Status:** Fixed in `scripts/deploy_droplet.sh`.
+7. **Startup banner detection regex** — same fix as above.
+
+### Issue 8: vLLM /metrics not accessible from laptop
+**Symptom:** `http://<droplet-ip>:8000/metrics` returns connection refused even though `/v1/models` works fine.
+
+**Root cause:** The vLLM `--metrics` flag is not enabled by default in vLLM 0.23. The `/metrics` endpoint is served on the same port but only from inside the container, not exposed by the AMD 1-Click image's port mapping. The existing `/v1/chat/completions` works because it's the primary API endpoint.
+
+**Workaround:** Access metrics inside the container:
+```bash
+docker exec rocm curl -s http://localhost:8000/metrics | grep vllm:
+```
+
+**Status:** Not a fix needed — documented as a limitation. The benchmark report already captures timing data from the Python client side.
+
+### Issue 9: Context length overflow at 12288 tokens
+**Symptom:** `This model's maximum context length is 12288 tokens. However, you requested 0 output tokens and your prompt contains at least 12289 input tokens.` — occurs on multi-turn tool-calling queries where the accumulated conversation history exceeds `--max-model-len`.
+
+**Fix:** Increased `--max-model-len` to 32768 in `deploy_droplet.sh`. KV cache at 32K is 744,619 tokens capacity (108 GiB). Model fits on MI300X with headroom.
+
+**Status:** Fixed. Default in `deploy_droplet.sh` changed from 12288 to 32768.
 
 ---
 
 ## Key learnings for the AMD stack
 
-1. **Container name is `rocm`, not `vllm`** — don't guess, auto-detect.
-2. **Use `--tool-call-parser gemma4`** — Gemma 4 has its own parser. `hermes` won't work.
-3. **Restart the container, not the process** — `docker restart rocm` to free leaked GPU memory. `pkill -9 vllm` leaks VRAM.
-4. **Model fits with headroom** — 59 GB weights, 108 GB KV cache (333K tokens), ~27× concurrent capacity at 12K context.
-5. **FP8 KV cache works** — confirmed on ROCm 7.2.3 on MI300X. No issues.
-6. **No speculative decoding** — removed from vLLM 0.23. Don't need it.
-7. **HF download needs `max_workers=4`** — slower than ideal but works.
-8. **vLLM REST port in container exposed as host port 8000** — no port mapping needed.
+1. Container name is `rocm`, not `vllm` — don't guess, auto-detect.
+2. Use `--tool-call-parser gemma4` — Gemma 4 has its own parser. `hermes` won't work.
+3. Restart the container, not the process — `docker restart rocm` to free leaked GPU memory. `pkill -9 vllm` leaks VRAM.
+4. Model fits with headroom — 59 GB weights, 108 GB KV cache (744K tokens at 32K context), 4.35× throughput at conc-8.
+5. FP8 KV cache works — confirmed on ROCm 7.2.3 on MI300X. No issues.
+6. No speculative decoding — removed from vLLM 0.23. Don't need it.
+7. Context window must be ≥32768 — 12288 is too tight for multi-turn tool-calling.
+8. vLLM /metrics Prometheus endpoint is available inside the container — prefix cache hit rate ~67%.
+9. HF download needs `max_workers=4` — slower than ideal but works.
+10. vLLM REST port in container exposed as host port 8000 — no port mapping needed.
