@@ -30,6 +30,9 @@ RETAIL_MODEL=google/gemma-4-31B-it \
 
 The public key is safe to commit (it's designed to be public). The private key lives at `~/.ssh/id_ed25519` with mode 600 and never enters git. When you create a new droplet, replace the values above with the new IP and key.
 
+**Current model:** Gemma 4 26B A4B MoE (instruction-tuned, `google/gemma-4-26B-A4B-it`). Faster than
+31B dense (~5.5× batch throughput, 48 GB vs 59 GB VRAM). Same `--tool-call-parser gemma4` flags.
+
 ### Quick reference
 
 ```bash
