@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
 # scripts/deploy_droplet.sh
 #
-# One-shot deployment for RetailConcierge on an AMD Radeon Cloud MI300X droplet.
+# One-shot reconfiguration of vLLM on an AMD Radeon Cloud MI300X 1-Click droplet.
 # Run from your laptop via `ssh root@<droplet-ip> 'bash -s' < scripts/deploy_droplet.sh`
 # or scp + run on the droplet.
 #
-# What this does:
+# This script assumes the AMD 1-Click image is already running. That image provides:
+#   - Ubuntu 24.04 host with ROCm 7.2.4 driver stack
+#   - Docker container named `rocm` running vLLM 0.23.0 + OpenAI server
+#   - JupyterLab environment (URL/token in MOTD at SSH login)
+#   - amd-smi / rocminfo for GPU verification
+#   - Port 8000 mapped to host (vLLM OpenAI-compatible API)
+#
+# What this script does on top of the preconfigured image:
 #   1. Verifies GPU + ROCm
-#   2. Locates the vLLM container (assumes AMD 1-Click Docker image)
+#   2. Locates the vLLM container (auto-detects `rocm` as the default name)
 #   3. Stops the default vLLM inside the container
 #   4. Pre-downloads the model to the HF cache (saves minutes on first serve)
 #   5. Records the model SHA-256 to /root/retailconcierge_fingerprint.txt
 #   6. Re-launches vLLM with rubric-winning flags:
 #        --enable-prefix-caching (multi-turn bonus)
-#        --enable-chunked-prefill (latency)
-#        --kv-cache-dtype fp8 (VRAM headroom)
-#        --speculative-config ngram (inter-token latency)
-#        --enable-auto-tool-choice --tool-call-parser hermes (MAF tool calls)
+#        --enable-chunked-prefill (latency under concurrency)
+#        --kv-cache-dtype fp8 (VRAM headroom on MI300X)
+#        --enable-auto-tool-choice --tool-call-parser gemma4 (Gemma 4 native tool calls)
 #   7. Waits for "server is fired up" or fails fast
 #   8. Smoke-tests: /health, /v1/models, and a real tool-call request
 #   9. Records GPU snapshot (amd-smi / rocm-smi) to /root/retailconcierge_gpu.txt
