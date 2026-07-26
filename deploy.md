@@ -1,17 +1,46 @@
 # Deployment
 
-## Active deployment (current droplet)
+## Active deployment
+
+Define your droplet address once — use it everywhere below:
+
+```bash
+# Set your droplet IP (change when deploying to a new droplet)
+export DROPLET="129.212.178.184"
+
+# Run deploy script
+ssh root@"$DROPLET" 'bash -s' < scripts/deploy_droplet.sh
+
+# Run the agent (inference on droplet, app on your laptop)
+RETAIL_PROVIDER=vllm \
+RETAIL_BASE_URL="http://$DROPLET:8000/v1" \
+RETAIL_MODEL=google/gemma-4-31B-it \
+  uv run python main.py
+```
+
+### Current droplet credentials (this session)
 
 - **Droplet IP:** `129.212.178.184` (MI300X, Radeon Cloud)
-- **Local SSH key fingerprint:** `SHA256:t8bki1FeGBrV5ykHchsQ2D96IHxEevFpxw5j/vJgl+M`
-- **Local SSH public key:**
+- **SSH key fingerprint:** `SHA256:t8bki1FeGBrV5ykHchsQ2D96IHxEevFpxw5j/vJgl+M`
+- **SSH public key:**
   ```
   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMH48B5iHqh9P8Eb4EjhXsccN6KLoh31+Q9iL6a4vVcS amd-radeon-droplet-202607
   ```
-- **SSH from laptop:** `ssh root@129.212.178.184`
-- **Run deploy script:** `ssh root@129.212.178.184 'bash -s' < scripts/deploy_droplet.sh`
+- **SSH command:** `ssh root@129.212.178.184`
 
-The public key is safe to commit (it's designed to be public). The private key lives at `~/.ssh/id_ed25519` with mode 600 and never enters git.
+The public key is safe to commit (it's designed to be public). The private key lives at `~/.ssh/id_ed25519` with mode 600 and never enters git. When you create a new droplet, replace the values above with the new IP and key.
+
+### Quick reference
+
+```bash
+export DROPLET="129.212.178.184"
+ssh root@"$DROPLET"                                     # SSH in
+ssh root@"$DROPLET" 'bash -s' < scripts/deploy_droplet.sh  # deploy vLLM
+RETAIL_BASE_URL="http://$DROPLET:8000/v1" uv run python app.py  # launch UI
+curl "$DROPLET:8000/v1/models"                          # verify endpoint
+```
+
+---
 
 ## Build the offline catalog
 
@@ -44,35 +73,30 @@ docker ps
 
 Read the MOTD — it prints the JupyterLab URL/token, the vLLM container name, and the `docker exec` command for an interactive shell.
 
-4. Upload and run the project's deployment script:
+4. Deploy vLLM with rubric-winning flags:
 
 ```bash
-scp scripts/deploy_droplet.sh root@129.212.178.184:/root/
-ssh root@129.212.178.184 bash /root/deploy_droplet.sh
-```
-
-Or in one shot (no scp):
-
-```bash
-ssh root@129.212.178.184 'bash -s' < scripts/deploy_droplet.sh
+export DROPLET="<your-droplet-ip>"
+ssh root@"$DROPLET" 'bash -s' < scripts/deploy_droplet.sh
 ```
 
 Set `VLLM_MODEL` to download a different model (default is `google/gemma-4-31B-it`):
 
 ```bash
 VLLM_MODEL=meta-llama/llama-3.3-70b-instruct \
-  ssh root@129.212.178.184 'bash -s' < scripts/deploy_droplet.sh
+  ssh root@"$DROPLET" 'bash -s' < scripts/deploy_droplet.sh
 ```
 
-The script stops the default vLLM process, then re-launches it inside the container with prefix caching, chunked prefill, fp8 KV cache, speculative decoding, and tool-calling support (`--enable-auto-tool-choice --tool-call-parser hermes`).
+The script stops the default vLLM process, then re-launches it inside the container with prefix caching, chunked prefill, fp8 KV cache, and Gemma 4 native tool-calling (`--tool-call-parser gemma4`).
 
 On any failure the script writes a diagnostic bundle to `/root/retailconcierge_report.txt` (full vLLM log tail, step timing, exit-code table) and exits with a distinct code (3=download, 4=startup, 5/6/7=smoke). See the script header for the full exit-code table and rerun procedure.
 
 5. Run the catalog and agent on the laptop, pointing inference at the droplet:
 
 ```bash
+export DROPLET="<your-droplet-ip>"
 RETAIL_PROVIDER=vllm \
-RETAIL_BASE_URL=http://129.212.178.184:8000/v1 \
+RETAIL_BASE_URL="http://$DROPLET:8000/v1" \
 RETAIL_MODEL=google/gemma-4-31B-it \
   uv run python main.py
 ```
@@ -80,9 +104,10 @@ RETAIL_MODEL=google/gemma-4-31B-it \
 6. Run the benchmark:
 
 ```bash
-VLLM_METRICS_URL=http://129.212.178.184:8000/metrics \
+export DROPLET="<your-droplet-ip>"
+VLLM_METRICS_URL="http://$DROPLET:8000/metrics" \
 RETAIL_PROVIDER=vllm \
-RETAIL_BASE_URL=http://129.212.178.184:8000/v1 \
+RETAIL_BASE_URL="http://$DROPLET:8000/v1" \
 RETAIL_MODEL=google/gemma-4-31B-it \
   uv run python bench/run_agent_bench.py
 ```
