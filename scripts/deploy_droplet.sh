@@ -22,7 +22,7 @@
 #   9. Records GPU snapshot (amd-smi / rocm-smi) to /root/retailconcierge_gpu.txt
 #
 # Overridable env vars (with defaults):
-#   VLLM_MODEL          = google/gemma-4-31B-it
+#   VLLM_MODEL          = google/gemma-4-26B-A4B-it
 #   MAX_LEN             = 32768
 #   GPU_MEM             = 0.90
 #   CTR_NAME            = rocm (auto-detected: rocm, vllm, inference, amd-vllm)
@@ -52,8 +52,8 @@
 
 set -euo pipefail
 
-VLLM_MODEL="${VLLM_MODEL:-google/gemma-4-31B-it}"
-MAX_LEN="${MAX_LEN:-12288}"
+VLLM_MODEL="${VLLM_MODEL:-google/gemma-4-26B-A4B-it}"
+MAX_LEN="${MAX_LEN:-32768}"
 GPU_MEM="${GPU_MEM:-0.90}"
 CTR_NAME="${CTR_NAME:-vllm}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
