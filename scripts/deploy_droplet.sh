@@ -123,13 +123,25 @@ for candidate in "$CTR_NAME" vllm-rocm vllm_openai amd-vllm inference; do
     fi
 done
 if [ -z "$DETECTED_CTR" ]; then
-    # Fallback: any running container with vLLM in its image
-    DETECTED_CTR=$(docker ps --format '{{.Image}}\t{{.Names}}' | grep -iE 'vllm' | head -1 | cut -f2 || true)
+    # Fallback 1: any running container with vllm/inference in its image
+    DETECTED_CTR=$(docker ps --format '{{.Image}}\t{{.Names}}' | grep -iE 'vllm|inference' | head -1 | cut -f2 || true)
+fi
+if [ -z "$DETECTED_CTR" ]; then
+    # Fallback 2: AMD Radeon droplets often name the container just 'rocm' or 'amd'
+    DETECTED_CTR=$(docker ps --format '{{.Names}}' | grep -iE '^(rocm|amd|vllm|inference)$' | head -1 || true)
+fi
+if [ -z "$DETECTED_CTR" ]; then
+    # Fallback 3: if there's exactly one running container, use it
+    RUNNING_COUNT=$(docker ps --format '{{.Names}}' | wc -l)
+    if [ "$RUNNING_COUNT" -eq 1 ]; then
+        DETECTED_CTR=$(docker ps --format '{{.Names}}' | head -1)
+        log "    Only one running container — falling back to it: $DETECTED_CTR"
+    fi
 fi
 if [ -z "$DETECTED_CTR" ]; then
     log "No vLLM container found. Running containers:"
     docker ps -a
-    die "could not find vLLM container — set CTR_NAME or launch the 1-Click image first" 2
+    die "could not find vLLM container — set CTR_NAME explicitly (current candidates tried: vllm, vllm-rocm, vllm_openai, amd-vllm, inference)" 2
 fi
 CTR_NAME="$DETECTED_CTR"
 log "Using container: $CTR_NAME"
