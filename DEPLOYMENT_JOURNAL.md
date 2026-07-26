@@ -119,17 +119,28 @@ docker exec rocm curl -s http://localhost:8000/metrics | grep vllm:
 
 **Status:** Fixed. Default in `deploy_droplet.sh` changed from 12288 to 32768.
 
+### Issue 10: Downloaded wrong model variant (26B-A4B instead of 26B-A4B-it)
+**Symptom:** MoE model failed to start with "As of transformers v4.44, default chat template is no longer allowed" — same pattern as the 31B vs 31B-it distinction.
+
+**Root cause:** Downloaded `google/gemma-4-26B-A4B` (base) instead of `google/gemma-4-26B-A4B-it` (instruction-tuned). The base model doesn't ship `chat_template.jinja`. The -it variant does.
+
+**Fix:** Downloaded the correct model (`gemma-4-26B-A4B-it`). It works out of the box with `--tool-call-parser gemma4`, no modifications needed.
+
+**Result:** MoE model delivers 1,575 tok/s at concurrency-8 (3.69× speedup), 48.5 GB VRAM (vs 58.9 GB for 31B), 35ms server-side TTFT, and 64% prefix cache hit rate.
+
+**Status:** Fixed. Droplet switched to MoE as default model (`google/gemma-4-26B-A4B-it`).
+
 ---
 
 ## Key learnings for the AMD stack
 
 1. Container name is `rocm`, not `vllm` — don't guess, auto-detect.
 2. Use `--tool-call-parser gemma4` — Gemma 4 has its own parser. `hermes` won't work.
-3. Restart the container, not the process — `docker restart rocm` to free leaked GPU memory. `pkill -9 vllm` leaks VRAM.
-4. Model fits with headroom — 59 GB weights, 108 GB KV cache (744K tokens at 32K context), 4.35× throughput at conc-8.
-5. FP8 KV cache works — confirmed on ROCm 7.2.3 on MI300X. No issues.
-6. No speculative decoding — removed from vLLM 0.23. Don't need it.
-7. Context window must be ≥32768 — 12288 is too tight for multi-turn tool-calling.
-8. vLLM /metrics Prometheus endpoint is available inside the container — prefix cache hit rate ~67%.
-9. HF download needs `max_workers=4` — slower than ideal but works.
-10. vLLM REST port in container exposed as host port 8000 — no port mapping needed.
+3. Restart the container, not the process — `docker restart rocm` to free leaked GPU memory.
+4. **Always use `-it` suffix** — the instruction-tuned variant is what ships the chat template and understands tool calling. Base variants lack both.
+5. MoE model (26B A4B) is faster than dense 31B — 3.69× system throughput, lower VRAM (48.5 vs 58.9 GB), same tool parser.
+6. vLLM /metrics exposes real TTFT histogram — preferred over client-side timing (network latency inflates client measurements).
+7. vLLM Prometheus metrics include: `time_to_first_token_seconds`, `prefix_cache_hits_total`, `num_requests_running`, `kv_cache_usage_perc`, `engine_sleep_state`, `generation_tokens_total`.
+8. FP8 KV cache works on ROCm 7.2.3 MI300X.
+9. Context window must be ≥32768 for multi-turn tool calling.
+10. HF download needs `max_workers=4`.
