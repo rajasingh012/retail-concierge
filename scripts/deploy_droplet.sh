@@ -145,7 +145,8 @@ if [ -z "$DETECTED_CTR" ]; then
 fi
 CTR_NAME="$DETECTED_CTR"
 log "Using container: $CTR_NAME"
-docker inspect --format '{{.Image}}' "$CTR_NAME" | head -1 | xargs -I{} log "  image: {}"
+IMG=$(docker inspect --format '{{.Image}}' "$CTR_NAME" 2>/dev/null | head -1)
+log "  image: ${IMG:-unknown}"
 
 # ─── [3/5] stop default vLLM, pre-download model ───────────────────────────
 step_start "[3/5] prep + download"
