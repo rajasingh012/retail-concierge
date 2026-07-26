@@ -94,7 +94,7 @@ class RankedItem(BaseModel):
 
     rank: int = Field(ge=1, le=MAX_RANKED_PRODUCTS)
     item_id: str = Field(min_length=1)
-    title_en: str = Field(min_length=1)
+    title_en: str = ""
     brand_en: str = ""
     product_type: str = ""
     product_url: str = ""
