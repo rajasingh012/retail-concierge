@@ -23,13 +23,9 @@
 #
 # Overridable env vars (with defaults):
 #   VLLM_MODEL          = google/gemma-4-31B-it
-#                            ^ the `-it` suffix = instruction-tuned. Required for
-#                              tool calling, JSON-schema adherence, and chat-format
-#                              prompts. The base model (no -it) won't follow agent
-#                              instructions reliably. Pass VLLM_MODEL=... to override.
 #   MAX_LEN             = 12288
 #   GPU_MEM             = 0.90
-#   CTR_NAME            = vllm  (auto-detected if that name isn't found)
+#   CTR_NAME            = rocm (auto-detected: rocm, vllm, inference, amd-vllm)
 #   SKIP_DOWNLOAD       = 0     (set to 1 to skip pre-download; useful for re-runs)
 #   SMOKE_TEST_QUERIES  = 1     (set to 0 to skip smoke tests)
 #
@@ -151,8 +147,19 @@ log "  image: ${IMG:-unknown}"
 # ─── [3/5] stop default vLLM, pre-download model ───────────────────────────
 step_start "[3/5] prep + download"
 
-log "    Stopping default vLLM inside $CTR_NAME"
-docker exec "$CTR_NAME" bash -c "pkill -f 'vllm serve' 2>/dev/null || true; pkill -f 'vllm.entrypoints' 2>/dev/null || true; sleep 3; pgrep -af vllm || echo '  vllm stopped'"
+log "    Stopping default vLLM inside $CTR_NAME (if running)"
+# Use || true on each command to prevent the script from dying if no vLLM exists
+docker exec "$CTR_NAME" bash -c '
+    pkill -f "vllm serve" 2>/dev/null
+    pkill -f "vllm.entrypoints" 2>/dev/null
+    sleep 3
+    if pgrep -af vllm >/dev/null 2>&1; then
+        echo "  vllm still running, attempting SIGKILL"
+        pkill -9 -f vllm
+        sleep 1
+    fi
+    pgrep -af vllm && echo "  WARN: vllm processes still present" || echo "  vllm stopped (or none was running)"
+' || log "    WARN: pkill command returned non-zero (probably no vllm was running)"
 
 if [ "$SKIP_DOWNLOAD" != "1" ]; then
     log "    Pre-downloading $VLLM_MODEL (skippable via SKIP_DOWNLOAD=1)"
@@ -213,8 +220,7 @@ step_start "[4/5] launch vLLM"
 log "    --enable-prefix-caching (multi-turn smoothness bonus)"
 log "    --enable-chunked-prefill (latency under concurrency)"
 log "    --kv-cache-dtype fp8 (VRAM headroom on MI300X)"
-log "    --speculative-config ngram (free inter-token-latency win)"
-log "    --enable-auto-tool-choice --tool-call-parser hermes (MAF tool calls)"
+log "    --enable-auto-tool-choice --tool-call-parser gemma4 (MAF tool calls, Gemma 4 native)"
 
 # shellcheck disable=SC2086
 docker exec -d "$CTR_NAME" bash -c "
@@ -228,19 +234,19 @@ docker exec -d "$CTR_NAME" bash -c "
         --enable-chunked-prefill \
         --kv-cache-dtype fp8 \
         --enable-auto-tool-choice \
-        --tool-call-parser hermes \
-        --speculative-config '{\"method\":\"ngram\",\"num_speculative_tokens\":5}' \
+        --tool-call-parser gemma4 \
         > '$LOG_FILE' 2>&1 &
     echo 'vLLM PID:' \$!
 "
 
-# Wait for startup banner. Pattern matches vLLM 0.23+ success message.
+# Wait for startup banner. vLLM 0.23 prints "Application startup complete".
+# Older versions print "server is fired up and ready to roll".
 log "    Waiting for vLLM startup (timeout: ${STARTUP_TIMEOUT}s, polling every ${INTERVAL:-10}s)"
 ELAPSED=0
 INTERVAL=10
 STARTED=0
 while [ "$ELAPSED" -lt "$STARTUP_TIMEOUT" ]; do
-    if docker exec "$CTR_NAME" grep -q "server is fired up and ready to roll" "$LOG_FILE" 2>/dev/null; then
+    if docker exec "$CTR_NAME" grep -qE "server is fired up and ready to roll|Application startup complete" "$LOG_FILE" 2>/dev/null; then
         STARTED=1
         break
     fi
