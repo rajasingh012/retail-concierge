@@ -6,6 +6,8 @@ SQLite FTS5 retrieves candidates from 145K products across 576 product types. Th
 
 The system never claims current prices, availability, shipping, ratings, or specifications absent from the catalog, and it does not add items to a cart or make purchases.
 
+![Track 2: Agentic AI](https://img.shields.io/badge/AMD-AI--DevMaster%202026-CC0000) ![GPU: MI300X](https://img.shields.io/badge/GPU-AMD%20Instinct%20MI300X-FF6B00) ![ROCm 7.2.3](https://img.shields.io/badge/ROCm-7.2.3-0086CB) ![vLLM 0.23.0](https://img.shields.io/badge/vLLM-0.23.0-7B68EE) ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB) ![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue)
+
 ## Quick start
 
 ```bash
@@ -19,22 +21,35 @@ uv run python scripts/import_catalog.py --shards data/abo/listings/
 # Default: DeepSeek V4 Flash (set DEEPSEEK_API_KEY in your environment)
 uv run python main.py
 
-# AMD MI300X (vLLM with Gemma 4)
+# AMD MI300X (vLLM with Gemma 4 26B A4B MoE)
+export DROPLET="<your-droplet-ip>"
 RETAIL_PROVIDER=vllm \
-RETAIL_BASE_URL=http://<droplet-ip>:8000/v1 \
-RETAIL_MODEL=google/gemma-4-31b-it \
+RETAIL_BASE_URL="http://$DROPLET:8000/v1" \
+RETAIL_MODEL=google/gemma-4-26B-A4B-it \
   uv run python main.py
 
-# Local development via DeepSeek
-export DEEPSEEK_API_KEY=***
-RETAIL_PROVIDER=deepseek RETAIL_MODEL=deepseek-chat uv run python main.py
+# Switch to the dense 31B variant (slower, stronger reasoning)
+RETAIL_MODEL=google/gemma-4-31B-it uv run python main.py
 ```
+
+## AMD Radeon performance (measured on MI300X, vLLM 0.23, ROCm 7.2.3)
+
+| Metric | 31B Dense | **26B A4B MoE** |
+|---|---|---|
+| Single throughput | 150 tok/s | **427 tok/s** |
+| Concurrency-8 throughput | 652 tok/s | **1,575 tok/s** |
+| Median TTFT (server-side) | ~35ms | **~35ms** |
+| Prefix cache hit rate | 64% | **64%** |
+| Model VRAM | 58.9 GiB | **48.5 GiB** |
+
+The MoE variant uses 3.8B active parameters per token and is **3.69× faster** than the dense 31B at concurrency-8 with the same tool-calling flags (`--tool-call-parser gemma4`, `--kv-cache-dtype fp8`, `--enable-prefix-caching`).
 
 ## Documentation
 
 - [architecture.md](architecture.md) — current design and data flow
 - [deploy.md](deploy.md) — catalog, inference, and benchmark commands
 - [progress.md](progress.md) — forward-looking work
+- [DEPLOYMENT_JOURNAL.md](DEPLOYMENT_JOURNAL.md) — real issues hit on AMD + fixes
 
 ## Hackathon: AMD AI DevMaster 2026
 
