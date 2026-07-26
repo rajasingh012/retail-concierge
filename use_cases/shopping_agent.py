@@ -50,7 +50,8 @@ Catalog workflow:
    must include its item_id, retrieval_rank, and the catalog flags
    (has_bullet, has_dimensions, has_weight, has_material) you received.
 5. Classify each item as exactly one of: exact_product, accessory, unrelated,
-   uncertain. Covers, mats, pillows, replacement parts, and add-ons are not
+   uncertain. Set the `classification` field on each candidate dict to the
+   value. Covers, mats, pillows, replacement parts, and add-ons are not
    the requested primary product.
 6. Call finalize_recommendations once with the full classified list. The
    application code removes ineligible products and applies deterministic
@@ -178,20 +179,13 @@ def build_shopping_agent(
     """
     tracker = tracker or CatalogEvidenceTracker()
     provider_options = provider_extras(provider) if provider else {}
-    # DeepSeek API does not accept `json_schema` response_format (400 error),
-    # and `json_object` mode is incompatible with tool calling (silently
-    # disables them). Omitting response_format entirely lets the model use
-    # tools freely; the extended prompt instructions + json-repair safety
-    # net ensure reliable JSON extraction from the final content.
-    response_format = (
-        None
-        if provider == "deepseek"
-        else RecommendationResponse
-    )
-    if response_format is None:
-        default_options = dict(provider_options)
-    else:
-        default_options = {"response_format": response_format, **provider_options}
+    # Some vLLM versions (0.23) suppress tool calling when `response_format`
+    # is set alongside `tools` — the model skips the tool-call loop and outputs
+    # JSON directly, bypassing the catalog. Omitting `response_format` for all
+    # providers lets tool calling work freely; the extended prompt instructions
+    # + json-repair safety net ensure reliable JSON extraction from the final
+    # content.
+    default_options = dict(provider_options)
     return Agent(
         client=client,
         instructions=SHOPPING_AGENT_INSTRUCTIONS,
