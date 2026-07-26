@@ -23,7 +23,7 @@
 #
 # Overridable env vars (with defaults):
 #   VLLM_MODEL          = google/gemma-4-31B-it
-#   MAX_LEN             = 12288
+#   MAX_LEN             = 32768
 #   GPU_MEM             = 0.90
 #   CTR_NAME            = rocm (auto-detected: rocm, vllm, inference, amd-vllm)
 #   SKIP_DOWNLOAD       = 0     (set to 1 to skip pre-download; useful for re-runs)
