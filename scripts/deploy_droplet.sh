@@ -23,6 +23,10 @@
 #
 # Overridable env vars (with defaults):
 #   VLLM_MODEL          = google/gemma-4-31B-it
+#                            ^ the `-it` suffix = instruction-tuned. Required for
+#                              tool calling, JSON-schema adherence, and chat-format
+#                              prompts. The base model (no -it) won't follow agent
+#                              instructions reliably. Pass VLLM_MODEL=... to override.
 #   MAX_LEN             = 12288
 #   GPU_MEM             = 0.90
 #   CTR_NAME            = vllm  (auto-detected if that name isn't found)
