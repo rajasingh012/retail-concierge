@@ -33,8 +33,22 @@
 #   0  = success
 #   1  = pre-flight failure (GPU/Docker)
 #   2  = container not found
-#   3  = vLLM did not come up within timeout
-#   4  = smoke test failed (vLLM up but tool calls broken)
+#   3  = model download / fingerprint failure
+#   4  = vLLM did not come up within timeout
+#   5  = smoke /health failed
+#   6  = smoke /v1/models failed
+#   7  = smoke tool-call probe failed
+#
+# Rerun procedure:
+#   - First run:        ./deploy_droplet.sh
+#   - Re-run (cached):  SKIP_DOWNLOAD=1 ./deploy_droplet.sh
+#   - Re-run (vLLM up): docker exec $CTR_NAME pkill -f 'vllm serve' && ./deploy_droplet.sh
+#
+# On any failure, read the diagnostic bundle:
+#   cat /root/retailconcierge_report.txt      # step-by-step summary
+#   cat /root/retailconcierge_vllm.log | tail -200   # full vLLM startup log
+#   cat /root/retailconcierge_fingerprint.txt # model + SHA-256
+#   cat /root/retailconcierge_gpu.txt         # amd-smi snapshot at failure
 
 set -euo pipefail
 
@@ -50,11 +64,31 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-600}"   # 10 min for model load
 FP_FILE="/root/retailconcierge_fingerprint.txt"
 GPU_FILE="/root/retailconcierge_gpu.txt"
 LOG_FILE="/root/retailconcierge_vllm.log"
+REPORT_FILE="/root/retailconcierge_report.txt"
 
-# ─── helper: timestamped log ────────────────────────────────────────────────
+# ─── helper: timestamped log + step timer ──────────────────────────────────
 ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
-log() { printf '[%s] %s\n' "$(ts)" "$*"; }
-die() { printf '[%s] FATAL: %s\n' "$(ts)" "$*" >&2; exit "${2:-1}"; }
+log() {
+    printf '[%s] %s\n' "$(ts)" "$*"
+    printf '[%s] %s\n' "$(ts)" "$*" >> "$REPORT_FILE"
+}
+die() {
+    local code="${2:-1}"
+    {
+        printf '[%s] FATAL: %s\n' "$(ts)" "$*"
+        printf '[%s] --- vLLM log tail (200 lines) ---\n' "$(ts)"
+        docker exec "$CTR_NAME" tail -200 "$LOG_FILE" 2>/dev/null || echo "  (log unavailable)"
+        printf '[%s] --- end of bundle ---\n' "$(ts)"
+    } >> "$REPORT_FILE" 2>&1
+    printf '[%s] FATAL: %s\n' "$(ts)" "$*" >&2
+    printf 'Full diagnostic bundle: %s\n' "$REPORT_FILE" >&2
+    exit "$code"
+}
+step_start() { STEP_NAME="$1"; STEP_T0="$(date +%s)"; log "─── $STEP_NAME ───"; }
+step_end() {
+    local dt=$(( $(date +%s) - STEP_T0 ))
+    log "    ✓ $STEP_NAME done (${dt}s)"
+}
 
 # ─── [1/5] pre-flight ───────────────────────────────────────────────────────
 log "[1/5] Pre-flight: GPU + Docker"
@@ -98,44 +132,67 @@ log "Using container: $CTR_NAME"
 docker inspect --format '{{.Image}}' "$CTR_NAME" | head -1 | xargs -I{} log "  image: {}"
 
 # ─── [3/5] stop default vLLM, pre-download model ───────────────────────────
-log "[3/5] Stopping default vLLM inside $CTR_NAME"
+step_start "[3/5] prep + download"
+
+log "    Stopping default vLLM inside $CTR_NAME"
 docker exec "$CTR_NAME" bash -c "pkill -f 'vllm serve' 2>/dev/null || true; pkill -f 'vllm.entrypoints' 2>/dev/null || true; sleep 3; pgrep -af vllm || echo '  vllm stopped'"
 
 if [ "$SKIP_DOWNLOAD" != "1" ]; then
-    log "    Pre-downloading $VLLM_MODEL to HF cache (skippable via SKIP_DOWNLOAD=1)"
-    docker exec "$CTR_NAME" bash -c "
+    log "    Pre-downloading $VLLM_MODEL (skippable via SKIP_DOWNLOAD=1)"
+    DL_LOG="$(mktemp)"
+    if ! docker exec "$CTR_NAME" bash -c "
         export HF_ENDPOINT=\${HF_ENDPOINT:-https://hf-mirror.com}
         python3 -c \"
 from huggingface_hub import snapshot_download
-import os
+import os, sys
 os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
-p = snapshot_download(repo_id='$VLLM_MODEL', allow_patterns=['*.json','*.txt','*.model','*.safetensors','tokenizer*'])
-print('Cached at:', p)
-\" 2>&1 | tail -5
-    "
+try:
+    p = snapshot_download(repo_id='$VLLM_MODEL', allow_patterns=['*.json','*.txt','*.model','*.safetensors','tokenizer*'])
+    print('Cached at:', p)
+except Exception as e:
+    print('DOWNLOAD ERROR:', type(e).__name__, str(e)[:500], file=sys.stderr)
+    sys.exit(1)
+\"
+    " >"$DL_LOG" 2>&1; then
+        log "    Download failed. Tail of download log:"
+        tail -20 "$DL_LOG" | sed 's/^/      /' | tee -a "$REPORT_FILE"
+        rm -f "$DL_LOG"
+        die "model download failed — set SKIP_DOWNLOAD=1 if cache is intact, or check HF_ENDPOINT" 3
+    fi
+    log "    $(tail -3 "$DL_LOG")"
+    rm -f "$DL_LOG"
 else
     log "    SKIP_DOWNLOAD=1 — using existing cache"
 fi
 
-# Record model fingerprint for the spec PDF
 log "    Recording model fingerprint"
-docker exec "$CTR_NAME" bash -c "
+if ! docker exec "$CTR_NAME" bash -c "
     python3 -c \"
 from huggingface_hub import HfApi
-api = HfApi()
-info = api.model_info('$VLLM_MODEL', files_metadata=True)
-print('Model:', '$VLLM_MODEL')
-print('SHA:', info.sha)
-print('Last modified:', info.last_modified)
-print('Pipeline:', info.pipeline_tag)
-print('Library:', info.library_name)
+import sys
+try:
+    api = HfApi()
+    info = api.model_info('$VLLM_MODEL', files_metadata=True)
+    print('Model:', '$VLLM_MODEL')
+    print('SHA:', info.sha)
+    print('Last modified:', info.last_modified)
+    print('Pipeline:', info.pipeline_tag)
+    print('Library:', info.library_name)
+except Exception as e:
+    print('FINGERPRINT ERROR:', type(e).__name__, str(e)[:500], file=sys.stderr)
+    sys.exit(1)
 \"
-" > "$FP_FILE" 2>&1
+" > "$FP_FILE" 2>&1; then
+    cat "$FP_FILE"
+    die "fingerprint capture failed — HF metadata unreachable; deployment cannot continue" 3
+fi
 log "    Fingerprint saved to $FP_FILE"
 cat "$FP_FILE"
+step_end "[3/5] prep + download"
 
 # ─── [4/5] launch vLLM with rubric-winning flags ────────────────────────────
-log "[4/5] Launching vLLM inside $CTR_NAME with rubric-winning flags"
+step_start "[4/5] launch vLLM"
+
 log "    --enable-prefix-caching (multi-turn smoothness bonus)"
 log "    --enable-chunked-prefill (latency under concurrency)"
 log "    --kv-cache-dtype fp8 (VRAM headroom on MI300X)"
@@ -161,7 +218,7 @@ docker exec -d "$CTR_NAME" bash -c "
 "
 
 # Wait for startup banner. Pattern matches vLLM 0.23+ success message.
-log "    Waiting for vLLM startup (timeout: ${STARTUP_TIMEOUT}s)"
+log "    Waiting for vLLM startup (timeout: ${STARTUP_TIMEOUT}s, polling every ${INTERVAL:-10}s)"
 ELAPSED=0
 INTERVAL=10
 STARTED=0
@@ -170,10 +227,15 @@ while [ "$ELAPSED" -lt "$STARTUP_TIMEOUT" ]; do
         STARTED=1
         break
     fi
+    if docker exec "$CTR_NAME" grep -qiE "OutOfMemoryError|CUDA out of memory|HIP out of memory|RuntimeError: out of memory|memory allocation failed" "$LOG_FILE" 2>/dev/null; then
+        log "    OOM detected in vLLM log. Tail:"
+        docker exec "$CTR_NAME" tail -80 "$LOG_FILE" 2>/dev/null | sed 's/^/      /' | tee -a "$REPORT_FILE"
+        die "vLLM ran out of GPU memory — try VLLM_MODEL with smaller weights, lower GPU_MEM, or shorter MAX_LEN" 4
+    fi
     if docker exec "$CTR_NAME" grep -qiE "error|exception|traceback" "$LOG_FILE" 2>/dev/null; then
         log "    vLLM logged an error. Tail:"
-        docker exec "$CTR_NAME" tail -40 "$LOG_FILE" || true
-        die "vLLM startup failed — check $LOG_FILE inside $CTR_NAME" 3
+        docker exec "$CTR_NAME" tail -80 "$LOG_FILE" 2>/dev/null | sed 's/^/      /' | tee -a "$REPORT_FILE"
+        die "vLLM startup failed — see diagnostic bundle for full log" 4
     fi
     sleep "$INTERVAL"
     ELAPSED=$((ELAPSED + INTERVAL))
@@ -182,10 +244,11 @@ done
 
 if [ "$STARTED" -ne 1 ]; then
     log "    Timeout. Tail of log:"
-    docker exec "$CTR_NAME" tail -50 "$LOG_FILE" || true
-    die "vLLM did not start within ${STARTUP_TIMEOUT}s" 3
+    docker exec "$CTR_NAME" tail -80 "$LOG_FILE" 2>/dev/null | sed 's/^/      /' | tee -a "$REPORT_FILE"
+    die "vLLM did not start within ${STARTUP_TIMEOUT}s — check STARTUP_TIMEOUT env or model size" 4
 fi
 log "    vLLM is ready."
+step_end "[4/5] launch vLLM"
 
 # ─── [5/5] smoke tests + GPU snapshot ───────────────────────────────────────
 log "[5/5] Smoke tests + GPU snapshot"
@@ -218,22 +281,29 @@ if [ "$SMOKE_TEST_QUERIES" != "1" ]; then
 fi
 
 # 1. /health
-log "    [smoke] /health"
-HEALTH=$(docker exec "$CTR_NAME" curl -fsS "http://localhost:$VLLM_PORT/health" 2>&1 || true)
-echo "$HEALTH" | head -3
-echo "$HEALTH" | grep -q '"status":"ok"' || die "vLLM /health did not return ok" 4
+log "    [smoke 1/3] /health"
+HEALTH=$(docker exec "$CTR_NAME" curl -fsS --max-time 10 "http://localhost:$VLLM_PORT/health" 2>&1 || true)
+log "      $(echo "$HEALTH" | head -1)"
+if ! echo "$HEALTH" | grep -q '"status":"ok"'; then
+    log "    /health response: $HEALTH"
+    log "    Recent vLLM log:"
+    docker exec "$CTR_NAME" tail -30 "$LOG_FILE" 2>/dev/null | sed 's/^/      /' | tee -a "$REPORT_FILE"
+    die "vLLM /health did not return ok — server may have crashed after startup" 5
+fi
 
 # 2. /v1/models — confirm model is loaded
-log "    [smoke] /v1/models"
-MODELS_JSON=$(docker exec "$CTR_NAME" curl -fsS "http://localhost:$VLLM_PORT/v1/models" 2>&1 || true)
-echo "$MODELS_JSON" | head -3
+log "    [smoke 2/3] /v1/models"
+MODELS_JSON=$(docker exec "$CTR_NAME" curl -fsS --max-time 10 "http://localhost:$VLLM_PORT/v1/models" 2>&1 || true)
+log "      $(echo "$MODELS_JSON" | head -c 200)"
 if ! echo "$MODELS_JSON" | grep -q "$VLLM_MODEL"; then
-    die "/v1/models does not list $VLLM_MODEL" 4
+    log "    Expected: $VLLM_MODEL"
+    log "    Got:      $MODELS_JSON"
+    die "/v1/models does not list $VLLM_MODEL — check --served-model-name or model arg" 6
 fi
 
 # 3. Tool-call probe — this is the make-or-break test for MAF
-log "    [smoke] tool-call probe (the critical test)"
-TOOL_CALL_RESP=$(docker exec "$CTR_NAME" curl -fsS "http://localhost:$VLLM_PORT/v1/chat/completions" \
+log "    [smoke 3/3] tool-call probe (the critical test for MAF)"
+TOOL_CALL_RESP=$(docker exec "$CTR_NAME" curl -fsS --max-time 30 "http://localhost:$VLLM_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d "{
         \"model\": \"$VLLM_MODEL\",
@@ -253,17 +323,27 @@ TOOL_CALL_RESP=$(docker exec "$CTR_NAME" curl -fsS "http://localhost:$VLLM_PORT/
             }
         }]
     }" 2>&1 || true)
-echo "$TOOL_CALL_RESP" | head -3
 
 if echo "$TOOL_CALL_RESP" | grep -q '"tool_calls"'; then
     log "    ✓ tool_calls present — vLLM is producing structured output"
 elif echo "$TOOL_CALL_RESP" | grep -q '"finish_reason":"tool_calls"'; then
     log "    ✓ finish_reason=tool_calls — vLLM is producing structured output"
 else
-    log "    Tool-call response (last 500 chars):"
-    echo "$TOOL_CALL_RESP" | tail -c 500
-    die "vLLM did not return tool_calls — check --tool-call-parser flag" 4
+    {
+        echo ""
+        echo "=== TOOL-CALL PROBE FAILED ==="
+        echo ""
+        echo "Full response:"
+        echo "$TOOL_CALL_RESP"
+        echo ""
+        echo "Hint: if response is plain text with JSON in it, the --tool-call-parser"
+        echo "flag is wrong. Try --tool-call-parser=llama3_json or pythonic."
+        echo "Last 50 lines of vLLM log:"
+        docker exec "$CTR_NAME" tail -50 "$LOG_FILE" 2>/dev/null
+    } | tee -a "$REPORT_FILE" >&2
+    die "vLLM did not return tool_calls — check --tool-call-parser flag" 7
 fi
+log "    ✓ All smoke tests passed."
 
 log ""
 log "=== DEPLOYMENT COMPLETE ==="
