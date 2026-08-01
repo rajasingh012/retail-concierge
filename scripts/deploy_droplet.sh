@@ -233,13 +233,26 @@ step_start "[4/5] launch vLLM"
 # Quark-quantized weights halve weight VRAM and lift MoE decode ~20-40%
 # (see scripts/quantize_fp8.sh for the build pipeline).
 #
-# vLLM loads Quark's HF export directly via --quantization quark (vLLM 0.26+
-# reads the `quantization_config` key in config.json and selects the right
-# kernel automatically). No `vllm convert` step is needed between Quark
-# and vLLM. Reference: docs.vllm.ai /stable/features/quantization/quark/.
+# vLLM ≥ 0.26 supports `--quantization quark` directly (reads the
+# `quantization_config` block Quark writes into config.json and picks
+# the right kernel). Reference:
+#   https://docs.vllm.ai/stable/features/quantization/quark/
+#
+# vLLM 0.23 (the AMD 1-Click image version) lacks this flag. We fall back
+# to `--quantization fp8` for the BF16→FP8 inference path that ships in
+# our window. The Quark-quantized model path remains a deferred TODO for
+# after vLLM ≥ 0.26 lands on the image.
 if [ -n "$VLLM_FP8_MODEL" ] && docker exec "$CTR_NAME" test -d "$VLLM_FP8_MODEL"; then
     SERVED_MODEL="$VLLM_FP8_MODEL"
-    SERVED_FLAGS="--quantization quark --kv-cache-dtype fp8"
+    VLLM_VERSION=$(docker exec "$CTR_NAME" python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "0.0.0")
+    if printf '%s\n' "$VLLM_VERSION" | awk -F. '{ exit !($1 > 0 || $2 >= 26) }'; then
+        SERVED_FLAGS="--quantization quark --kv-cache-dtype fp8"
+        log "    Serving Quark-quantized FP8 weights from $VLLM_FP8_MODEL (vLLM $VLLM_VERSION supports --quantization quark)"
+    else
+        SERVED_FLAGS="--quantization fp8 --kv-cache-dtype fp8"
+        log "    WARNING: vLLM $VLLM_VERSION < 0.26 — falling back to --quantization fp8 (no Quark recipe);"
+        log "             see scripts/quantize_fp8.sh TODO on upgrading to vLLM nightly for the Quark path"
+    fi
     log "    Serving Quark-quantized FP8 weights from $VLLM_FP8_MODEL"
 else
     SERVED_MODEL="$VLLM_MODEL"
