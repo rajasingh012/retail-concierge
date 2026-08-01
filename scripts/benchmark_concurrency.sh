@@ -49,8 +49,16 @@ die() { printf '[%s] FATAL: %s\n' "$(ts)" "$*" >&2; exit "${2:-1}"; }
 
 # ─── preflight ───────────────────────────────────────────────────────────────
 log "[1/3] Preflight: endpoint reachable"
-if ! curl -fsS --max-time 5 "$BASE_URL/health" 2>/dev/null | grep -q '"status":"ok"'; then
-    die "vLLM endpoint at $BASE_URL is not healthy — run scripts/deploy_droplet.sh first"
+HEALTH_URL="$BASE_URL"
+case "$HEALTH_URL" in
+    */v1) HEALTH_URL="$HEALTH_URL/../health" ;;
+    */)   HEALTH_URL="${HEALTH_URL}health" ;;
+    *)    HEALTH_URL="$HEALTH_URL/health" ;;
+esac
+# vLLM 0.23 returns HTTP 200 with an EMPTY body on /health (no JSON payload).
+# Newer vLLM returns {"status":"ok"}. Accept either: 200 with any body.
+if ! curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$HEALTH_URL" 2>/dev/null | grep -q '^200$'; then
+    die "vLLM endpoint at $BASE_URL is not healthy (checked $HEALTH_URL) — run scripts/deploy_droplet.sh first"
 fi
 log "    $BASE_URL healthy, model=$MODEL"
 
@@ -112,14 +120,18 @@ for N in $CONCURRENCIES; do
             [[ "$line" == *"[bench]"* ]] || continue
 
             # Extract "<sec>s" (the first occurrence after [bench] N/M).
-            sec=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+s' | head -1 | tr -d 's')
+            # grep exits 1 on no-match; || true so set -e doesn't kill us.
+            sec=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+s' | head -1 | tr -d 's' || true)
             [ -z "$sec" ] && continue
 
             scenarios_done=$((scenarios_done + 1))
 
-            # "ranked=N" with N>0 = pass.
-            ranked=$(echo "$line" | grep -oE 'ranked=[1-9][0-9]*' | head -1 | cut -d= -f2)
-            [ -n "$ranked" ] && pass_count=$((pass_count + 1))
+            # "ranked=N" with N>0 = pass. No-match (ranked=0 or no ranked
+            # field) is NOT a pass but must not kill the script.
+            ranked=$(echo "$line" | grep -oE 'ranked=[1-9][0-9]*' | head -1 | cut -d= -f2 || true)
+            if [ -n "$ranked" ]; then
+                pass_count=$((pass_count + 1))
+            fi
 
             # Running mean.
             mean_s=$(awk -v a="$mean_s" -v b="$sec" -v n="$scenarios_done" \
