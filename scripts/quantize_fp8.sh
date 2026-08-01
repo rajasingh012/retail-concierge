@@ -50,6 +50,7 @@ set -euo pipefail
 
 CTR_NAME="${CTR_NAME:-rocm}"
 BF16_CACHE="/root/.cache/huggingface/hub/models--google--gemma-4-26B-A4B-it"
+DB="${DB:-/workspace/retail_catalog.db}"
 FP8_OUT="${FP8_OUT:-/models/gemma-4-26B-A4B-it-fp8}"
 CALIB_OUT="${CALIB_OUT:-/root/retailconcierge_calib.jsonl}"
 NUM_CALIB="${NUM_CALIB:-256}"
@@ -80,12 +81,22 @@ log "[2/4] Building calibration set → $CALIB_OUT"
 if [ "$SKIP_CALIB" = "1" ] && docker exec "$CTR_NAME" test -s "$CALIB_OUT"; then
     log "    SKIP_CALIB=1 — reusing existing $CALIB_OUT"
 else
+    # Calibration set is built inside the container so it sees the same
+    # Python env (huggingface_hub, sqlite3, json, random) and the same
+    # catalog DB the agent will serve from. python3 -c '...' because
+    # the shell-side heredoc would reformat the long f-string.
     docker exec "$CTR_NAME" python3 -c "
 import json, random, sys
 from pathlib import Path
 
+NUM_CALIB = $NUM_CALIB
+
 # Seed prompts from bench/run_agent_bench.py SAMPLE_SCENARIOS — same workload
-# the quantization will serve in production.
+# the quantization will serve in production. We oversample prompts (40%)
+# and undersample catalog titles (60%) so the activation range reflects
+# both the brief's natural distribution and the catalog's vocabulary.
+PROMPT_FRACTION = 0.40
+
 scenarios = [
     'I need a lightweight carry-on spinner luggage with four wheels.',
     'Find noise cancelling over-ear headphones with strong noise reduction.',
@@ -93,35 +104,59 @@ scenarios = [
     'Recommend a laptop backpack for daily commuting.',
     'Find a mechanical gaming keyboard with RGB lighting.',
 ]
+prompt_quota = max(1, int(NUM_CALIB * PROMPT_FRACTION))
+catalog_quota = NUM_CALIB - prompt_quota
 
-# Add catalog titles + first bullet so activation ranges reflect the agent's
-# actual context distribution (system prompt + brief + catalog snippets).
-catalog_path = Path('retail_catalog.db')
-import sqlite3
-conn = sqlite3.connect(catalog_path)
-cur = conn.cursor()
+# Catalog titles pulled live from the same DB the agent queries.
+catalog_titles = []
 try:
-    rows = cur.execute('SELECT title_en FROM listings WHERE title_en IS NOT NULL LIMIT 1000').fetchall()
-except sqlite3.OperationalError:
-    rows = []
+    import sqlite3
+    conn = sqlite3.connect('$DB')
+    cur = conn.cursor()
+    catalog_titles = [
+        r[0] for r in cur.execute(
+            'SELECT title_en FROM listings WHERE title_en IS NOT NULL'
+        ).fetchall()
+        if r and r[0]
+    ]
+    conn.close()
+except Exception as exc:
+    print('WARN: could not read catalog titles:', exc, file=sys.stderr)
 
-catalog_titles = [r[0] for r in rows if r and r[0]]
+# Build the quota with sampling-with-replacement so we always hit NUM_CALIB
+# regardless of how many unique catalog titles we have. This is fine for
+# activation-range calibration: Quark only needs ~64-512 short sequences,
+# duplicate tokens are normal.
 random.seed(20260801)
-out_path = Path('$CALIB_OUT')
-
-# Build up to NUM_CALIB samples: prompts and catalog titles interleaved.
 samples = []
-per_bucket = max(1, ($NUM_CALIB // (len(scenarios) + max(1, len(catalog_titles) // 10))))
-for s in scenarios:
-    samples.extend([s] * per_bucket)
-for i in range(0, len(catalog_titles), 10):
-    samples.append(catalog_titles[i])
-samples = samples[:$NUM_CALIB]
+samples.extend(random.choices(scenarios, k=prompt_quota))
+if catalog_titles:
+    samples.extend(random.choices(catalog_titles, k=catalog_quota))
+else:
+    # Fallback: pad with scenario prompts if catalog reading failed.
+    samples.extend(random.choices(scenarios, k=catalog_quota))
 
+# Interleave by alternating (round-robin), padding the shorter bucket
+# up-front so the tail of the longer bucket gets interleaved too.
+prompts = samples[:prompt_quota]
+catalogs = samples[prompt_quota:]
+interleaved = []
+i = j = 0
+while i < len(prompts) or j < len(catalogs):
+    if i < len(prompts):
+        interleaved.append(prompts[i])
+        i += 1
+    if j < len(catalogs):
+        interleaved.append(catalogs[j])
+        j += 1
+assert len(interleaved) == NUM_CALIB, f'expected {NUM_CALIB}, got {len(interleaved)}'
+
+out_path = Path('$CALIB_OUT')
+out_path.parent.mkdir(parents=True, exist_ok=True)
 with out_path.open('w', encoding='utf-8') as f:
-    for s in samples:
+    for s in interleaved:
         f.write(json.dumps({'text': s}) + '\n')
-print(f'wrote {len(samples)} samples to {out_path}')
+print(f'wrote {len(interleaved)} samples ({prompt_quota} prompts + {catalog_quota} catalog) to {out_path}')
 " || die "calibration set build failed"
     log "    Calibration set ready"
 fi
