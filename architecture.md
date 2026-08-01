@@ -41,13 +41,13 @@ RetailConcierge is one MAF `Agent` responsible for the complete user conversatio
 
 The five MAF tools, in call order:
 
-| Tool | Description |
+| Tool | What it does |
 |---|---|
-| `extract_brief` | LLM args. Agent fills a `ShoppingBrief` Pydantic model (intent, search_terms, product_type, brand, budget_usd converted to USD, max_dimension_cm converted to cm, must_have, nice_to_have, color, material, compatibility, target_use, quantity, assumptions, evidence_gaps) via MAF tool calling. Tool body returns the validated brief dict. No database access, no offline parsing — the LLM owns field extraction. |
+| `extract_brief` | LLM fills a `ShoppingBrief` Pydantic model; tool body validates (typed currency / dimension / quantity conversion, vocabulary gate). |
 | `find_product_types` | LIKE-match against the `product_type` column, ordered by listing count. |
-| `find_brands` | Three-tier brand resolution: exact prefix → FTS5 (stemming + close misspellings) → LIKE fallback. |
-| `search_catalog` | BM25 via FTS5, up to 50 candidates with optional product-type, brand, and dimension filters. Records observed `item_id` values into the session's `CatalogEvidenceTracker`. |
-| `finalize_recommendations` | Drops candidates whose `item_id` was not observed by `search_catalog` in the current session, keeps only `exact_product`, applies deterministic multi-field ranking, and returns the authoritative order. |
+| `find_brands` | Three-tier resolution: exact prefix → FTS5 → LIKE fallback. Handles misspellings and case. |
+| `search_catalog` | BM25 via FTS5, up to 50 candidates with optional type / brand / dimension filters. Records observed `item_id` values into the session's tracker. |
+| `finalize_recommendations` | Drops candidates whose `item_id` was not seen by `search_catalog` in this session, keeps only `exact_product`, applies deterministic multi-field ranking. Returns the authoritative order. |
 
 ## Conversation
 
@@ -119,7 +119,7 @@ erDiagram
 
 SQLite FTS5 searches title and brand and returns up to 50 candidates in BM25 order. SQL can apply exact product-type and dimension filters first. Product identity is then screened semantically by the agent; keyword blacklists are not used.
 
-Each `search_catalog` call records the returned `item_id` values into the session's `CatalogEvidenceTracker`. The agent's `finalize_recommendations` tool drops any candidate whose `item_id` was never observed by `search_catalog` in the current session, so invented or hallucinated IDs cannot enter the displayed list. The candidate order produced by the finalizer is authoritative.
+Each `search_catalog` call records the returned `item_id` values into the session's `CatalogEvidenceTracker`, and `finalize_recommendations` drops any candidate whose `item_id` was not seen in this session — so invented IDs cannot reach the displayed list. The finalizer's candidate order is authoritative.
 
 Eligible candidates are ordered deterministically by:
 
@@ -131,54 +131,11 @@ Eligible candidates are ordered deterministically by:
 
 The catalog contains no prices, ratings, review counts, popularity data, or live availability. The system never claims those facts.
 
-## Brief-time vocabulary canonicalization
+## Misspelling, foreign-language, and paraphrase handling
 
-`extract_brief` is the single point per turn where the LLM maps the user's words to canonical catalog values. It runs first, before any search tool call.
+`extract_brief` is the single point per turn where the LLM maps user words to canonical catalog values. It runs first, before any search tool call.
 
-The agent is given the catalog's vocabulary in the system prompt as two annotated lists:
-
-- `CATALOG_PRODUCT_TYPES` — up to 80 canonical values, filtered by `HAVING COUNT(*) >= 5` so single-listing accidentals from import don't pollute the list.
-- `CATALOG_BRANDS` — up to 200 canonical values, ordered by listing count, so the most-popular brands float to the top of the context window.
-
-Instructions in the prompt require the LLM to canonicalize at write time: a misspelling ("ofice chair"), a foreign-language term ("chaise de bureau", "krzesło biurowe"), a paraphrase ("executive seating"), or an abbreviation ("ofc chr") must all map to the closest catalog value. `search_terms` carries the literal user terms first and a normalized form second, so FTS5 has both.
-
-```mermaid
-flowchart LR
-  user(["user: 'ofice chair for <br/>studying at home'"])
-  prompt["system prompt<br/>+ CATALOG_PRODUCT_TYPES list<br/>+ CATALOG_BRANDS list<br/>+ canonicalization rules"]
-  brief["extract_brief<br/>(LLM returns ShoppingBrief)"]
-  gate["Pydantic model_validator<br/>product_type, brand<br/>vs. seeded vocab"]
-  search["search_catalog<br/>(product_type=CHAIR<br/>terms='office chair')"]
-
-  user --> prompt
-  prompt --> brief
-  brief --> gate
-  gate -- exact match --> search
-  gate -- off-vocab --> err["ValueError to MAF<br/>(model retries<br/>with correct value)"]
-  err --> brief
-```
-
-The validator is `domain.recommendation.ShoppingBrief._gate_against_catalog_vocabulary`. It is opt-in: the catalog calls `set_catalog_vocabulary(types, brands)` at agent build time, and the validator only fires when the seeded sets are non-empty. Empty values pass through (user did not specify), case variations fold to the catalog's canonical casing, and exact-match failures raise `ValidationError` which MAF surfaces to the model as a tool error. The model then retries with the correct value or omits the field, falling back to catalog-search-time discovery.
-
-This handles all four misspelling classes at once:
-
-1. Typo ("logtec") — canonical form folds via case-insensitive membership.
-2. Foreign-language ("chaise de bureau") — LLM-native fuzzy mapping.
-3. Paraphrase ("executive seating") — LLM-native fuzzy mapping.
-4. Abbreviation ("ofc chr") — LLM-native fuzzy mapping.
-
-A database-side fuzzy match would handle class 1 only. Adding a fuzzy index would not handle classes 2-4 at any reasonable cost; the LLM does it for free in the tool call we were already making.
-
-Test coverage (`tests/test_brief_vocabulary_gate.py`, 9 tests):
-
-- validator is a no-op when no vocab is seeded
-- exact match passes
-- case folds to the catalog's canonical casing
-- unknown product_type / brand rejected with helpful error
-- empty values bypass the gate
-- reseeding changes behavior mid-process
-- substring matching is strict (`headphone` ≠ `HEADPHONES`)
-- whitespace-only entries in the seeded vocab are filtered out
+The system prompt appends the catalog's `product_type` and `brand` vocabularies. The LLM canonicalizes at write time: misspellings ("ofice chair"), foreign-language terms ("chaise de bureau", "krzesło biurowe"), paraphrases ("executive seating"), abbreviations ("ofc chr") all map to the closest catalog value. A brief-level Pydantic validator rejects off-vocabulary values so the model cannot silently pass wrong types/brands into `search_catalog`. This handles all four input variations in the one tool call we already make, instead of stacking database-side fuzzy indexes per field. Implementation lives in `domain/recommendation.py` (validator) and `use_cases/shopping_agent.py` (prompt composition); tests in `tests/test_brief_vocabulary_gate.py`.
 
 ## Session boundary
 
@@ -197,7 +154,7 @@ The CLI creates one `AgentSession` and reuses it until the user exits. MAF store
 
 ## Audit log
 
-Every catalog and finalizer tool call writes one entry to an append-only JSONL file. Each line is JSON with `seq`, `ts`, `session_id`, `tool`, `args`, `result_meta`, `prev_hash`, and `entry_hash` where `entry_hash = sha256(canonical_json(entry_without_entry_hash))`. Each entry's `prev_hash` links to the previous entry's `entry_hash`; the chain head is the most recent `entry_hash`. Genesis is 64 zeros. `canonical_json` is deterministic (sorted keys, UTF-8, no ASCII escapes, NaN/Inf rejected) so equal entries always hash equal.
+Every catalog and finalizer tool call writes one entry to an append-only JSONL file. Each entry links to the previous one via `prev_hash`; the chain head is the most recent `entry_hash`; the chain is `sha256(canonical_json(entry_without_entry_hash))`. `extract_brief` is not recorded (no external-data semantics). The logger is opt-in: `RETAIL_AUDIT_LOG=./retail_audit.jsonl`.
 
 ```mermaid
 flowchart LR
@@ -218,16 +175,6 @@ flowchart LR
   E3 -- "entry_hash=H3" --> E4
 ```
 
-Four tools are recorded: `find_product_types`, `find_brands`, `search_catalog`, and `finalize_recommendations`. `extract_brief` is not recorded — it has no external-data semantics. Each call uses a single write with `fsync`, so the file on disk always reflects the last completed entry. The logger holds a process-level lock around writes and refuses to reopen over a corrupt tail.
-
-The logger is opt-in. Set `RETAIL_AUDIT_LOG=./retail_audit.jsonl` (or any path) to enable; leave unset for no behavior change. The `main.py` and `app.py` composition roots construct an `infrastructure.audit.AuditLogger` only when the environment variable is present, and pass it through `build_tools` and `build_shopping_agent`.
-
-`finalize_recommendations` records three fields that matter for the audit story:
-
-- `proposed_item_ids` — every item_id the model fed to the tool this call.
-- `accepted_item_ids` — what survived the provenance gate and ranking, in authoritative order.
-- `provenance_blocked` — `proposed - tracker.snapshot()`, i.e. item_ids the model tried to put on the list that were not actually returned by `search_catalog` in this session. Empty list means the model stayed within the catalog.
-
 ```mermaid
 flowchart LR
   proposed["model proposes to<br/>finalize_recommendations"]
@@ -242,6 +189,6 @@ flowchart LR
   gate -- "not in tracker" --> blocked
 ```
 
-A separate `provenance_blocked` field is the only artifact that proves the gate had anything to catch, and the hash chain is what proves the log itself was not edited afterwards.
+`finalize_recommendations` records `proposed_item_ids`, `accepted_item_ids`, and `provenance_blocked` — the `provenance_blocked` field is the only artifact that proves the provenance gate had anything to catch.
 
-Verify with `python scripts/audit_verify.py retail_audit.jsonl` (stdlib only, no project deps, works on the demo droplet without a venv). Exit 0 means the chain is intact; exit 1 means a violation was found (line edit, line delete, reorder, or seq skip). `--summary` emits a machine-readable JSON report.
+Verify with `python scripts/audit_verify.py retail_audit.jsonl` (stdlib only, no project deps, works on the demo droplet without a venv). Implementation: `infrastructure/audit.py` (logger), `scripts/audit_verify.py` (verifier), tests `tests/test_audit_log.py`.
