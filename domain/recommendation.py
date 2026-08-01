@@ -18,10 +18,26 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 MAX_RANKED_PRODUCTS = 5
 MAX_REFINEMENT_CHIPS = 5
+
+# Cached catalog vocabularies populated lazily. The brief validator uses
+# these to gate the LLM-resolved product_type / brand against the catalog
+# so misspelled / hallucinated mappings are rejected deterministically
+# instead of silently passed through to search_catalog.
+_VOCAB: dict[str, set[str]] = {}
+
+
+def set_catalog_vocabulary(product_types: set[str], brands: set[str]) -> None:
+    """Seed the brief validator with the catalog's known vocabulary."""
+    _VOCAB["product_types"] = {t.strip() for t in product_types if t.strip()}
+    _VOCAB["brands"] = {b.strip() for b in brands if b.strip()}
+
+
+def _vocab(field: str) -> set[str]:
+    return _VOCAB.get(field, set())
 
 
 def _coerce_str_list(value: Any) -> list[str]:
@@ -219,6 +235,62 @@ class ShoppingBrief(BaseModel):
             "stated in INR with no clear USD reference rate')."
         ),
     )
+
+    @model_validator(mode="after")
+    def _gate_against_catalog_vocabulary(self) -> "ShoppingBrief":
+        """Reject product_type / brand values not in the seeded catalog vocabulary.
+
+        ``extract_brief`` runs once per turn and is the single point where the
+        LLM maps the user's words to canonical catalog values. Misspellings,
+        foreign-language input ("chaise de bureau"), and paraphrases
+        ("executive seating") all funnel through this validator.
+
+        Gating here means the LLM cannot silently pass a wrong
+        product_type / brand into search_catalog and silently get an empty
+        result set. The validator rejects with a clear error message and
+        MAF returns the error to the model, which then retries with the
+        correct canonical value (or omits the field, falling back to
+        catalog-search-time discovery).
+
+        Empty values bypass the gate — "not specified" is a valid brief
+        state. Off-vocab values the LLM wrote deliberately (e.g.
+        user-restated brand that genuinely is not in the catalog)
+        are rejected so the human-visible evidence_gaps list stays honest
+        about why the search returned empty.
+        """
+        product_type = (self.product_type or "").strip()
+        brand = (self.brand or "").strip()
+        if product_type:
+            catalog = _vocab("product_types")
+            if catalog and product_type not in catalog:
+                # Be lenient on case so we don't false-reject valid mappings
+                # the model lowercased / uppercased.
+                match = next(
+                    (t for t in catalog if t.lower() == product_type.lower()),
+                    None,
+                )
+                if match is None:
+                    raise ValueError(
+                        f"product_type {product_type!r} is not in the catalog "
+                        "vocabulary; leave empty or pick an exact catalog value"
+                    )
+                # Normalize case to the catalog's canonical form so the
+                # downstream search gets a stable hit.
+                self.product_type = match
+        if brand:
+            catalog = _vocab("brands")
+            if catalog and brand not in catalog:
+                match = next(
+                    (b for b in catalog if b.lower() == brand.lower()),
+                    None,
+                )
+                if match is None:
+                    raise ValueError(
+                        f"brand {brand!r} is not in the catalog vocabulary; "
+                        "leave empty or pick an exact catalog value"
+                    )
+                self.brand = match
+        return self
 
 
 class FinalizedCandidate(BaseModel):

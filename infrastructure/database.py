@@ -209,6 +209,56 @@ class ABOCatalogRepository:
             for row in rows
         ]
 
+    def list_product_types(self, *, min_listings: int = 5) -> list[dict[str, object]]:
+        """Distinct product_type buckets with enough data to be a real signal.
+
+        ``min_listings`` filters single-listing accidentals (test rows, sparse
+        imports) that would otherwise pollute the vocabulary. Used to seed
+        the brief-time LLM resolver, which only needs canonical types the
+        user could realistically have asked about.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT product_type, COUNT(*) AS product_count
+            FROM listings
+            WHERE product_type IS NOT NULL AND product_type <> ''
+            GROUP BY product_type
+            HAVING product_count >= ?
+            ORDER BY product_count DESC, product_type
+            """,
+            (min_listings,),
+        ).fetchall()
+        return [
+            {"product_type": row["product_type"], "product_count": row["product_count"]}
+            for row in rows
+        ]
+
+    def list_brands(self, *, limit: int = 100, min_listings: int = 1) -> list[dict[str, object]]:
+        """Distinct brand buckets ordered by listing count.
+
+        ``min_listings`` defaults to 1 (any brand) but raise it to drop sparse
+        brands. ``limit`` defaults to 100 so the entire common-brand vocabulary
+        fits in a brief-time prompt without bloating context (~2k tokens).
+        """
+        limit = max(1, min(limit, 500))
+        rows = self._conn.execute(
+            """
+            SELECT brand_en, COUNT(*) AS product_count
+            FROM listings
+            WHERE brand_en IS NOT NULL AND brand_en <> ''
+            GROUP BY brand_en
+            HAVING product_count >= ?
+            ORDER BY product_count DESC, brand_en
+            LIMIT ?
+            """,
+            (min_listings, limit),
+        ).fetchall()
+        return [
+            {"brand": row["brand_en"], "product_count": row["product_count"]}
+            for row in rows
+        ]
+
+
     def find_brands(self, query: str, limit: int = 5) -> list[dict[str, object]]:
         """Return brand buckets ordered by listing count.
 

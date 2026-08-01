@@ -75,6 +75,28 @@ Brief extraction rules:
 - assumptions: reasoning notes (e.g. "considered 200 EUR ~ 216 USD at 1.08").
 - evidence_gaps: parts of the brief that are weak or guessed.
 
+Canonicalization against the catalog vocabulary:
+- product_type: when the user implies a category, return the EXACT value from
+  the supplied CATALOG_PRODUCT_TYPES list. If the user wrote a misspelling
+  ("ofice chair"), a foreign-language term ("chaise de bureau", "krzesło
+  biurowe"), a paraphrase ("executive seating"), or an abbreviation ("ofc
+  chr"), pick the closest catalog value. Leave the field empty only when no
+  catalog category fits. The runtime validator rejects off-vocabulary values,
+  so do not invent.
+- brand: when the user names a brand, return the EXACT value from the supplied
+  CATALOG_BRANDS list. Misspellings ("logtec"), foreign spellings, and case
+  variations ("logitech" vs "Logitech" vs "LOGITECH") all normalize to the
+  catalog spelling. Leave empty when the user did not specify a brand or used
+  a name not present in the catalog. The runtime validator rejects off-vocabulary
+  values.
+- search_terms: if the user's literal terms would return zero BM25 hits
+  (misspelling, foreign language, paraphrased), include a corrected / normalized
+  form alongside the literal terms so search_catalog has both. E.g.
+  user wrote "wireles earbuds" -> search_terms = ["wireless earbuds",
+  "bluetooth in-ear"]. User wrote "chaise de bureau" -> ["office chair",
+  "ergonomic chair"]. User wrote "executive seating" -> ["office chair"].
+  Literal terms always come first; corrected forms second.
+
 Brief extraction examples:
 - "a pair of wireless earbuds under $60"
   intent="wireless earbuds for a pair, budget around $60",
@@ -144,6 +166,7 @@ def _build_agent_tools(
     *,
     tracker: CatalogEvidenceTracker,
     audit_logger: Any = None,
+    catalog_vocabulary: dict[str, list[str]] | None = None,
 ) -> list[Any]:
     """Compose the tool list for the shopping agent.
 
@@ -152,10 +175,27 @@ def _build_agent_tools(
     model can use the evidence it observed earlier in the turn.
     """
     return [
-        _make_extract_brief_tool(),
+        _make_extract_brief_tool(catalog_vocabulary=catalog_vocabulary),
         *catalog_tools,
         _make_finalize_tool(tracker, audit_logger=audit_logger),
     ]
+
+
+def _seed_brief_validator(catalog_vocabulary: dict[str, list[str]] | None) -> None:
+    """Push the catalog vocabulary into the brief Pydantic validator.
+
+    Called once at agent build time. Empty vocabulary is a no-op so test
+    fixtures (and the off-catalog fallback path) can keep using the bare
+    brief without seeding.
+    """
+    if not catalog_vocabulary:
+        return
+    from domain.recommendation import set_catalog_vocabulary
+
+    set_catalog_vocabulary(
+        set(catalog_vocabulary.get("product_types") or []),
+        set(catalog_vocabulary.get("brands") or []),
+    )
 
 
 def build_shopping_agent(
@@ -165,6 +205,7 @@ def build_shopping_agent(
     tracker: CatalogEvidenceTracker | None = None,
     provider: str = "",
     audit_logger: Any = None,
+    catalog_vocabulary: dict[str, list[str]] | None = None,
 ) -> Agent:
     """Build the one MAF agent used for every turn in a shopping session.
 
@@ -180,6 +221,10 @@ def build_shopping_agent(
             by the server.
         audit_logger: Optional ``AuditLogger``; finalize_recommendations
             records one entry per call with the screening outcomes.
+        catalog_vocabulary: Optional ``{"product_types": [...], "brands": [...]}``
+            catalog terms used to gate the brief against the catalog
+            (validator) and to seed the system prompt with the canonical
+            product_type / brand values the LLM should map to.
     """
     tracker = tracker or CatalogEvidenceTracker()
     provider_options = provider_extras(provider) if provider else {}
@@ -190,14 +235,56 @@ def build_shopping_agent(
     # + json-repair safety net ensure reliable JSON extraction from the final
     # content.
     default_options = dict(provider_options)
+    _seed_brief_validator(catalog_vocabulary)
+    instructions = _compose_instructions(catalog_vocabulary)
     return Agent(
         client=client,
-        instructions=SHOPPING_AGENT_INSTRUCTIONS,
+        instructions=instructions,
         tools=_build_agent_tools(
-            catalog_tools, tracker=tracker, audit_logger=audit_logger
+            catalog_tools,
+            tracker=tracker,
+            audit_logger=audit_logger,
+            catalog_vocabulary=catalog_vocabulary,
         ),
         default_options=default_options,
     )
+
+
+def _compose_instructions(catalog_vocabulary: dict[str, list[str]] | None) -> str:
+    """Append the canonical product_type / brand vocabulary to the prompt.
+
+    Keeps the static ``SHOPPING_AGENT_INSTRUCTIONS`` readable; the appended
+    section is small, deterministic, and refreshed on each agent build
+    (which is per-process, not per-turn).
+    """
+    if not catalog_vocabulary:
+        return SHOPPING_AGENT_INSTRUCTIONS
+    types_section = _format_vocabulary_section(
+        "CATALOG_PRODUCT_TYPES", catalog_vocabulary.get("product_types") or []
+    )
+    brands_section = _format_vocabulary_section(
+        "CATALOG_BRANDS", catalog_vocabulary.get("brands") or []
+    )
+    return (
+        SHOPPING_AGENT_INSTRUCTIONS
+        + "\n\nCatalog vocabulary:\n"
+        + types_section
+        + "\n"
+        + brands_section
+    )
+
+
+def _format_vocabulary_section(label: str, terms: list[str]) -> str:
+    """Format a vocabulary list. Capped at 80 entries / 2,000 chars for prompt budget."""
+    if not terms:
+        return f"{label}: (catalog has no entries yet)"
+    capped = [str(t) for t in terms[:80] if t]
+    body = ", ".join(capped)
+    if len(capped) < len(terms):
+        body += f", ... (+{len(terms) - len(capped)} more)"
+    if len(body) > 2_000:
+        body = body[:1_997] + "..."
+    return f"{label}:\n  {body}"
 
 
 def build_finalize_recommendations_tool(
@@ -261,7 +348,7 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker, audit_logger: Any = Non
     return finalize_recommendations
 
 
-def _make_extract_brief_tool():
+def _make_extract_brief_tool(catalog_vocabulary: dict[str, list[str]] | None = None):
     """Build the structured brief extraction tool.
 
     The tool's argument is the ShoppingBrief Pydantic model. MAF exposes the
@@ -269,6 +356,12 @@ def _make_extract_brief_tool():
     MAF passes the parsed JSON back to the tool body as a plain dict. The
     tool body re-validates the dict through ShoppingBrief so the canonical
     typed model is the single source of truth, then returns ``model_dump()``.
+
+    When ``catalog_vocabulary`` is provided at agent build time, the brief's
+    Pydantic model_validator (see ``domain.recommendation.ShoppingBrief``)
+    is already seeded to reject off-vocabulary product_type / brand values.
+    The tool body just re-validates and surfaces any rejection to MAF as a
+    tool error, so the model gets a clean retry signal.
     """
 
     @tool(
@@ -297,6 +390,7 @@ def _make_extract_brief_tool():
         validated = ShoppingBrief.model_validate(brief)
         return validated.model_dump()
 
+    extract_brief._catalog_vocabulary = catalog_vocabulary  # type: ignore[attr-defined]
     return extract_brief
 
 

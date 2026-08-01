@@ -37,6 +37,9 @@ def get_agent():
     if audit_path:
         from infrastructure.audit import AuditLogger
         audit_logger = AuditLogger(Path(audit_path))
+    from main import _load_catalog_vocabulary
+
+    catalog_vocabulary = _load_catalog_vocabulary(repo)
     catalog_tools = build_tools(repo, catalog_tracker=tracker, audit_logger=audit_logger)
     agent = build_shopping_agent(
         client,
@@ -44,6 +47,7 @@ def get_agent():
         tracker=tracker,
         provider=provider,
         audit_logger=audit_logger,
+        catalog_vocabulary=catalog_vocabulary,
     )
 
     stats = repo.stats()

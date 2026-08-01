@@ -131,6 +131,55 @@ Eligible candidates are ordered deterministically by:
 
 The catalog contains no prices, ratings, review counts, popularity data, or live availability. The system never claims those facts.
 
+## Brief-time vocabulary canonicalization
+
+`extract_brief` is the single point per turn where the LLM maps the user's words to canonical catalog values. It runs first, before any search tool call.
+
+The agent is given the catalog's vocabulary in the system prompt as two annotated lists:
+
+- `CATALOG_PRODUCT_TYPES` — up to 80 canonical values, filtered by `HAVING COUNT(*) >= 5` so single-listing accidentals from import don't pollute the list.
+- `CATALOG_BRANDS` — up to 200 canonical values, ordered by listing count, so the most-popular brands float to the top of the context window.
+
+Instructions in the prompt require the LLM to canonicalize at write time: a misspelling ("ofice chair"), a foreign-language term ("chaise de bureau", "krzesło biurowe"), a paraphrase ("executive seating"), or an abbreviation ("ofc chr") must all map to the closest catalog value. `search_terms` carries the literal user terms first and a normalized form second, so FTS5 has both.
+
+```mermaid
+flowchart LR
+  user(["user: 'ofice chair for <br/>studying at home'"])
+  prompt["system prompt<br/>+ CATALOG_PRODUCT_TYPES list<br/>+ CATALOG_BRANDS list<br/>+ canonicalization rules"]
+  brief["extract_brief<br/>(LLM returns ShoppingBrief)"]
+  gate["Pydantic model_validator<br/>product_type, brand<br/>vs. seeded vocab"]
+  search["search_catalog<br/>(product_type=CHAIR<br/>terms='office chair')"]
+
+  user --> prompt
+  prompt --> brief
+  brief --> gate
+  gate -- exact match --> search
+  gate -- off-vocab --> err["ValueError to MAF<br/>(model retries<br/>with correct value)"]
+  err --> brief
+```
+
+The validator is `domain.recommendation.ShoppingBrief._gate_against_catalog_vocabulary`. It is opt-in: the catalog calls `set_catalog_vocabulary(types, brands)` at agent build time, and the validator only fires when the seeded sets are non-empty. Empty values pass through (user did not specify), case variations fold to the catalog's canonical casing, and exact-match failures raise `ValidationError` which MAF surfaces to the model as a tool error. The model then retries with the correct value or omits the field, falling back to catalog-search-time discovery.
+
+This handles all four misspelling classes at once:
+
+1. Typo ("logtec") — canonical form folds via case-insensitive membership.
+2. Foreign-language ("chaise de bureau") — LLM-native fuzzy mapping.
+3. Paraphrase ("executive seating") — LLM-native fuzzy mapping.
+4. Abbreviation ("ofc chr") — LLM-native fuzzy mapping.
+
+A database-side fuzzy match would handle class 1 only. Adding a fuzzy index would not handle classes 2-4 at any reasonable cost; the LLM does it for free in the tool call we were already making.
+
+Test coverage (`tests/test_brief_vocabulary_gate.py`, 9 tests):
+
+- validator is a no-op when no vocab is seeded
+- exact match passes
+- case folds to the catalog's canonical casing
+- unknown product_type / brand rejected with helpful error
+- empty values bypass the gate
+- reseeding changes behavior mid-process
+- substring matching is strict (`headphone` ≠ `HEADPHONES`)
+- whitespace-only entries in the seeded vocab are filtered out
+
 ## Session boundary
 
 The CLI creates one `AgentSession` and reuses it until the user exits. MAF stores the turn history in that session, allowing a clarification answer or refinement to continue the same conversation. The CLI does not persist sessions across process restarts.

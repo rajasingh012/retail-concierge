@@ -28,6 +28,27 @@ DEFAULT_DB = Path("./retail_catalog.db")
 DEFAULT_AUDIT_LOG = Path("./retail_audit.jsonl")
 
 
+def _load_catalog_vocabulary(repository: ABOCatalogRepository) -> dict[str, list[str]]:
+    """Pull the canonical product_type / brand lists for the brief prompt.
+
+    Bounded by ``min_listings`` to skip singleton product_types from the
+    import (test rows, partial imports). Brand list capped at 200 to keep
+    the prompt section under ~2k tokens; the brief validator still gates
+    every value so off-vocabulary mapping attempts surface as Pydantic
+    rejections.
+    """
+    return {
+        "product_types": [
+            str(row["product_type"])
+            for row in repository.list_product_types(min_listings=5)
+        ],
+        "brands": [
+            str(row["brand"])
+            for row in repository.list_brands(limit=200, min_listings=1)
+        ],
+    }
+
+
 def resolve_client():
     """Build the MAF OpenAI-compatible client from environment variables."""
     provider = os.getenv("RETAIL_PROVIDER", DEFAULT_PROVIDER)
@@ -132,6 +153,7 @@ async def run_chat() -> None:
     if audit_path:
         from infrastructure.audit import AuditLogger
         audit_logger = AuditLogger(Path(audit_path))
+    catalog_vocabulary = _load_catalog_vocabulary(repository)
     catalog_tools = _build_catalog_tools(
         repository, catalog_tracker=tracker, audit_logger=audit_logger
     )
@@ -141,6 +163,7 @@ async def run_chat() -> None:
         tracker=tracker,
         provider=provider,
         audit_logger=audit_logger,
+        catalog_vocabulary=catalog_vocabulary,
     )
     session = agent.create_session()
     stats = repository.stats()
