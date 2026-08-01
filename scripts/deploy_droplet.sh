@@ -232,9 +232,14 @@ step_start "[4/5] launch vLLM"
 # Pick the serving model: prefer FP8 if it's been quantized, else BF16 source.
 # Quark-quantized weights halve weight VRAM and lift MoE decode ~20-40%
 # (see scripts/quantize_fp8.sh for the build pipeline).
+#
+# vLLM loads Quark's HF export directly via --quantization quark (vLLM 0.26+
+# reads the `quantization_config` key in config.json and selects the right
+# kernel automatically). No `vllm convert` step is needed between Quark
+# and vLLM. Reference: docs.vllm.ai /stable/features/quantization/quark/.
 if [ -n "$VLLM_FP8_MODEL" ] && docker exec "$CTR_NAME" test -d "$VLLM_FP8_MODEL"; then
     SERVED_MODEL="$VLLM_FP8_MODEL"
-    SERVED_FLAGS="--quantization fp8"
+    SERVED_FLAGS="--quantization quark --kv-cache-dtype fp8"
     log "    Serving Quark-quantized FP8 weights from $VLLM_FP8_MODEL"
 else
     SERVED_MODEL="$VLLM_MODEL"

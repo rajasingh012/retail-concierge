@@ -35,16 +35,16 @@
 #     FP16" pattern. The rejection is publishable, not a failure.
 #
 # Env overrides (with defaults):
-#   BF16_MODEL   = /root/.cache/huggingface/hub/.../google--gemma-4-26B-A4B-it/snapshots/<sha>
 #   FP8_OUT      = /models/gemma-4-26B-A4B-it-fp8
 #   CALIB_OUT    = /root/retailconcierge_calib.jsonl
 #   NUM_CALIB    = 256        # Quark's recommended default
 #   SKIP_CALIB   = 0          # set 1 if you've already produced CALIB_OUT
 #
-# Pre-flight: Quark must be installed in the container.
-#   docker exec rocm pip show amd-quark  ||  pip install amd-quark
-# Verify CLI shape before running — Quark CLI is moving target; check
-# https://quark.docs.amd.com/ for current flag names.
+# Pre-flight: Quark 0.12+ must be installed in the container.
+#   docker exec rocm pip show amd-quark  ||  pip install "amd-quark>=0.12"
+# Verified CLI shape against:
+#   https://quark.docs.amd.com/  (versions.html dated 2026-07-03 → 0.12)
+#   https://docs.vllm.ai/stable/features/quantization/quark/ (dated 2026-05-15)
 
 set -euo pipefail
 
