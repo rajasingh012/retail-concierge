@@ -188,3 +188,25 @@ The W8A8 INT8 scheme works on the 31B dense (proven −0.08pp GSM8K) but corrupt
 **Verdict (final):** Quark W8A8 INT8 quantization is NOT viable for the 26B A4B MoE. The 20-pt quantization bonus is not claimable. Documented per PR #7's honest-rejection framing. Future work (post-submission): try static activation quantization with calibration data, or FP8 (`fp8_e4m3`) instead of INT8.
 
 **Status:** BF16 restored as serving default on the vLLM 0.26 droplet (parity verified, mean 9.5s). INT8-MoE experiment closed with documented negative result.
+
+### Issue 13: MoE-aware quantization attempt — fused-expert split + correct exclusions, still garbage
+**Date:** 2026-08-01
+
+**Goal:** Fix the INT8-MoE corruption using the MoE-specific recipe from `nameistoken/Qwen3.6-35B-A3B-Quark-W8A8-INT8` (HF) — a 256-expert MoE quantized with Quark, +0.00pp GSM8K. The recipe's two structural steps were missing from the 31B-dense recipe we initially copied.
+
+**Pre-quantization rewrite (implemented):** `Gemma4TextExperts` stores fused 3D tensors (`gate_up_proj [128, 1408, 2816]`, `down_proj [128, 2816, 704]`). Replaced each of the 30 MoE layers' experts module with a `ModuleList[128]` of per-expert `gate_proj`/`up_proj`/`down_proj` nn.Linear triplets, copied from the fused tensors — so Quark observes standard nn.Linear modules and the export key layout matches vLLM's FusedMoE loader. Verified: "Split fused experts in 30 layers (128 experts each)".
+
+**Exclusion fixes (iterative, all discovered via vLLM loader errors):**
+- `*mlp.gate*` splits fused `gate_up_proj` shards → vLLM ValueError "different quantization schemes for gate_proj/up_proj"
+- `*visual*` doesn't match `embed_vision`/`vision_tower` prefixes → vLLM ValueError on `embed_vision.embedding_projection.weight_scale`
+- Final list: `lm_head`, `*router*`, `*shared_expert_gate*`, `*vision_tower*`, `*embed_vision*`, `*visual*`, `*embed_tokens*`
+
+**Post-export rename (implemented):** `*_quantizer.scale` → `*_scale`, dropped `*_quantizer.zero_point`, squeezed `weight_scale` [out,1]→[out] (per the Qwen recipe's rename_keys.py).
+
+**Result:** Model loads cleanly in vLLM 0.26 (25.75 GiB, no loader errors) but **output is still garbage** (`_0_re_0-re_0_s_0-s_re-target-0-s-1-s-1` for "What is 2+2"). Four attempts total (dense as-is, dense+MoE exclusions, MoE-aware, MoE-aware+vision fixes) — all load, all garbage.
+
+**Verdict (final):** The W8A8 INT8 path is not viable for Gemma 4 26B A4B MoE with Quark 0.12 + vLLM 0.26, even with the full MoE recipe. Hypothesis: the corruption is in the **dynamic per-token activation quantization** interacting with Gemma 4's unusual `per_layer_input_gate` / `hidden_size_per_layer_input` structure (not present in Qwen MoE), or the vision-language cross-attention paths. The tokens come out grammatically-shaped but semantically empty — consistent with activations being destroyed mid-network rather than weights.
+
+**Future work (post-submission):** (a) try `is_dynamic=False` + calibration dataset (static activation quantization); (b) try FP8 (`ptpc_fp8`) instead of INT8; (c) inspect Gemma 4's per_layer_input_gate handling in Quark's observer attachment. The recipe scaffolding (`_quark_quantize_moe.py`) is committed for provenance.
+
+**Status:** BF16 restored as serving default on vLLM 0.26 (129.212.191.188). Quantization bonus not claimable — documented honestly per PR #7 framing.
