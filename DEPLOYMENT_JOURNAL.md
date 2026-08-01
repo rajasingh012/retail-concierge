@@ -144,3 +144,28 @@ docker exec rocm curl -s http://localhost:8000/metrics | grep vllm:
 8. FP8 KV cache works on ROCm 7.2.3 MI300X.
 9. Context window must be ≥32768 for multi-turn tool calling.
 10. HF download needs `max_workers=4`.
+
+### Issue 11: Quark INT8 quantization succeeded, vLLM 0.23 MoE loader rejects it
+**Date:** 2026-08-01
+
+**Goal:** Quantize `google/gemma-4-26B-A4B-it` (BF16, 51.6 GB) with AMD Quark to claim the quantization bonus.
+
+**Recipe:** `nameistoken/Gemma-4-31B-it-Quark-W8A8-INT8` on HF — same `Gemma4ForConditionalGeneration` architecture, measured −0.08pp on GSM8K vs BF16. Scheme: per-channel INT8 weights (ch_axis=0) + per-token dynamic INT8 activations (ch_axis=1). Exclusions stay BF16: `lm_head`, `*embed_tokens*`, `*vision_tower*`, `*embed_vision*`. No calibration data needed (dynamic activation).
+
+**Quark 0.12 API drift vs the 0.11 recipe (all hit live):**
+- `Config` → `QConfig`, `QuantizationConfig` → `QLayerConfig`
+- `ModelQuantizer.export_model()` → `quark.torch.export_safetensors()`
+- `amd_quark.tools.quark_quantize` CLI removed entirely
+- `LLMTemplate.get("gemma4")` — **no gemma4 template exists** in Quark 0.12 (only gemma2/gemma3). The recipe's manual QConfig is mandatory.
+
+**Result:** Quantization **succeeded in 57s** on MI300X → `/models/gemma-4-26B-A4B-it-int8/model.safetensors` (49.96 GB, I8 weights + BF16 per-channel scales + zero-points). Verified tensors: `layers.0.router.proj.weight` I8, `weight_scale` BF16 [128], `weight_zero_point` I8 — correct W8A8 format.
+
+**Blocker:** vLLM 0.23 auto-detects `quantization=quark` from config.json, but the EngineCore fails:
+```
+KeyError: 'layers.0.router.proj.weight_scale'
+```
+The safetensors key is `model.language_model.layers.0.router.proj.weight_scale` (with prefix). vLLM 0.23's Quark MoE router loader builds the lookup key **without** the `model.language_model.` prefix → KeyError. Non-MoE layers work; the MoE router path is the bug.
+
+**Verdict:** Our quantization is correct. The blocker is vLLM 0.23's Quark-MoE loader. Fix requires vLLM ≥ 0.26 (Quark MoE support matured) — the AMD 1-Click image ships 0.23. Deferred, documented per PR #7's "production recommendation remains FP16" framing.
+
+**Status:** INT8 model saved at `/models/gemma-4-26B-A4B-it-int8` (droplet), BF16 server restored as default. Revisit post-submission with vLLM ≥ 0.26.
