@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # scripts/deploy_droplet.sh
 #
+# ARCHITECTURE BOUNDARY: this script manages vLLM ONLY on the GPU droplet.
+# The application (app.py / main.py / MAF agent), the catalog DB, and all
+# source code live on the developer's laptop. The droplet serves the model
+# endpoint; nothing else. Do NOT copy the repo or the catalog DB to the
+# droplet — the calibration/quantization scripts run on the laptop or pass
+# data via scp, never by leaving app artifacts on the GPU host.
+#
 # One-shot reconfiguration of vLLM on an AMD Radeon Cloud MI300X 1-Click droplet.
 # Run from your laptop via `ssh root@<droplet-ip> 'bash -s' < scripts/deploy_droplet.sh`
 # or scp + run on the droplet.
@@ -160,10 +167,13 @@ log "  image: ${IMG:-unknown}"
 step_start "[3/5] prep + download"
 
 log "    Stopping default vLLM inside $CTR_NAME (if running)"
-# Use || true on each command to prevent the script from dying if no vLLM exists
+# Use || true on each command to prevent the script from dying if no vLLM exists.
+# Also kill orphaned VLLM::EngineCore children — they hold GPU VRAM even after
+# the parent vllm serve process dies (seen live on the MI300X droplet).
 docker exec "$CTR_NAME" bash -c '
     pkill -f "vllm serve" 2>/dev/null
     pkill -f "vllm.entrypoints" 2>/dev/null
+    pkill -9 -f "VLLM::EngineCore" 2>/dev/null
     sleep 3
     if pgrep -af vllm >/dev/null 2>&1; then
         echo "  vllm still running, attempting SIGKILL"
@@ -302,6 +312,9 @@ docker exec -d "$CTR_NAME" bash -c "
 
 # Wait for startup banner. vLLM 0.23 prints "Application startup complete".
 # Older versions print "server is fired up and ready to roll".
+# The log file lives INSIDE the container (the launch redirect wrote it
+# there via docker exec), so the polling loop must read it via docker exec —
+# a host-path read never sees it.
 log "    Waiting for vLLM startup (timeout: ${STARTUP_TIMEOUT}s, polling every ${INTERVAL:-10}s)"
 ELAPSED=0
 INTERVAL=10
@@ -311,7 +324,7 @@ while [ "$ELAPSED" -lt "$STARTUP_TIMEOUT" ]; do
         STARTED=1
         break
     fi
-    if docker exec "$CTR_NAME" grep -qiE "OutOfMemoryError|CUDA out of memory|HIP out of memory|RuntimeError: out of memory|memory allocation failed" "$LOG_FILE" 2>/dev/null; then
+    if docker exec "$CTR_NAME" grep -qiE "OutOfMemoryError|CUDA out of memory|HIP out of memory|RuntimeError: out of memory|memory allocation failed|Free memory on device" "$LOG_FILE" 2>/dev/null; then
         log "    OOM detected in vLLM log. Tail:"
         docker exec "$CTR_NAME" tail -80 "$LOG_FILE" 2>/dev/null | sed 's/^/      /' | tee -a "$REPORT_FILE"
         die "vLLM ran out of GPU memory — try VLLM_MODEL with smaller weights, lower GPU_MEM, or shorter MAX_LEN" 4
@@ -364,15 +377,18 @@ if [ "$SMOKE_TEST_QUERIES" != "1" ]; then
     exit 0
 fi
 
-# 1. /health
+# 1. /health — vLLM 0.23 returns HTTP 200 with an EMPTY body. Also note:
+#    `docker exec rocm curl` returns empty even when the server is healthy
+#    (loopback inside the container doesn't resolve the same way), so probe
+#    from the HOST, not inside the container.
 log "    [smoke 1/3] /health"
-HEALTH=$(docker exec "$CTR_NAME" curl -fsS --max-time 10 "http://localhost:$VLLM_PORT/health" 2>&1 || true)
-log "      $(echo "$HEALTH" | head -1)"
-if ! echo "$HEALTH" | grep -q '"status":"ok"'; then
-    log "    /health response: $HEALTH"
+HEALTH_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://localhost:$VLLM_PORT/health" 2>&1 || true)
+log "      /health HTTP $HEALTH_CODE"
+if [ "$HEALTH_CODE" != "200" ]; then
+    log "    /health did not return 200 (got $HEALTH_CODE)"
     log "    Recent vLLM log:"
     docker exec "$CTR_NAME" tail -30 "$LOG_FILE" 2>/dev/null | sed 's/^/      /' | tee -a "$REPORT_FILE"
-    die "vLLM /health did not return ok — server may have crashed after startup" 5
+    die "vLLM /health did not return 200 — server may have crashed after startup" 5
 fi
 
 # 2. /v1/models — confirm model is loaded

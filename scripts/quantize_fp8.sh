@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # scripts/quantize_fp8.sh
 #
+# ARCHITECTURE BOUNDARY: the catalog DB stays on the developer's laptop.
+# This script runs on the GPU droplet, but it reads calibration data that
+# the laptop builds and scp's over (see CALIB_OUT). It does NOT need the
+# catalog DB on the droplet. If you're building the calibration set from
+# the live catalog, build it on the laptop and pass the JSONL path.
+#
 # One-shot AMD Quark FP8 W8A8 quantization of the Gemma 4 26B A4B-it BF16
 # checkpoint. Produces /models/gemma-4-26B-A4B-it-fp8/ which
 # scripts/deploy_droplet.sh will pick up when VLLM_FP8_MODEL is set.
@@ -50,7 +56,12 @@ set -euo pipefail
 
 CTR_NAME="${CTR_NAME:-rocm}"
 BF16_CACHE="/root/.cache/huggingface/hub/models--google--gemma-4-26B-A4B-it"
-DB="${DB:-/workspace/retail_catalog.db}"
+# The catalog DB does NOT live on the droplet (architecture boundary).
+# If you need live-catalog calibration, build it on the laptop and scp the
+# resulting JSONL; set DB only when you genuinely have a DB reachable from
+# the container (e.g. a shared mount). Default: empty = skip catalog titles,
+# use the SAMPLE_SCENARIOS prompts only.
+DB="${DB:-}"
 FP8_OUT="${FP8_OUT:-/models/gemma-4-26B-A4B-it-fp8}"
 CALIB_OUT="${CALIB_OUT:-/root/retailconcierge_calib.jsonl}"
 NUM_CALIB="${NUM_CALIB:-256}"
