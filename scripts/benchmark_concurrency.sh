@@ -105,13 +105,14 @@ for N in $CONCURRENCIES; do
     wait_dt=$(( $(date +%s) - wait_start ))
 
     # Aggregate latencies across sub-process JSON outputs (parsed from logs).
-    # bench/run_5_queries.py prints per-scenario latency on stdout, e.g.:
+    # bench/run_agent_bench.py prints per-scenario latency on stdout, e.g.:
     #   [bench] 1/5 12.345s; kind=recommendations ranked=5
     p50=0
     mean_s=0
     worst_s=0
     scenarios_done=0
     pass_count=0
+    all_secs=()
 
     for logfile in "$RUN_DIR"/*.log; do
         [ -f "$logfile" ] || continue
@@ -125,6 +126,7 @@ for N in $CONCURRENCIES; do
             [ -z "$sec" ] && continue
 
             scenarios_done=$((scenarios_done + 1))
+            all_secs+=("$sec")
 
             # "ranked=N" with N>0 = pass. No-match (ranked=0 or no ranked
             # field) is NOT a pass but must not kill the script.
@@ -144,8 +146,10 @@ for N in $CONCURRENCIES; do
     done
 
     if [ "$scenarios_done" -gt 0 ]; then
-        p50=$(awk -v mean="$mean_s" -v worst="$worst_s" \
-            'BEGIN { printf "%.3f", (mean + worst) / 2 }')
+        # Real median (P50), not (mean+worst)/2. Sort numerically, pick middle.
+        sorted_secs=$(printf '%s\n' "${all_secs[@]}" | sort -n)
+        mid=$(( (scenarios_done + 1) / 2 ))
+        p50=$(echo "$sorted_secs" | sed -n "${mid}p")
         pass_pct=$(awk -v p="$pass_count" -v t="$scenarios_done" \
             'BEGIN { printf "%.0f%%", (p * 100) / t }')
     else
