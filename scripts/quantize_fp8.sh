@@ -1,245 +1,134 @@
 #!/usr/bin/env bash
 # scripts/quantize_fp8.sh
 #
-# ARCHITECTURE BOUNDARY: the catalog DB stays on the developer's laptop.
-# This script runs on the GPU droplet, but it reads calibration data that
-# the laptop builds and scp's over (see CALIB_OUT). It does NOT need the
-# catalog DB on the droplet. If you're building the calibration set from
-# the live catalog, build it on the laptop and pass the JSONL path.
+# ARCHITECTURE BOUNDARY: the catalog DB and app stay on the developer's
+# laptop. This script runs on the GPU droplet and quantizes the BF16 model
+# that lives in the container's HF cache. It needs NO catalog DB — W8A8 INT8
+# uses dynamic activation quantization, so no calibration data is required.
 #
-# One-shot AMD Quark FP8 W8A8 quantization of the Gemma 4 26B A4B-it BF16
-# checkpoint. Produces /models/gemma-4-26B-A4B-it-fp8/ which
-# scripts/deploy_droplet.sh will pick up when VLLM_FP8_MODEL is set.
+# One-shot AMD Quark W8A8 INT8 quantization of the Gemma 4 26B A4B-it BF16
+# checkpoint. Produces /models/gemma-4-26B-A4B-it-int8/ which
+# scripts/deploy_droplet.sh picks up when VLLM_FP8_MODEL is set.
 #
-# Run from inside the vLLM container on the AMD droplet:
-#   docker exec -it rocm bash
-#   cd /workspace         # or wherever the repo is checked out
-#   bash scripts/quantize_fp8.sh
+# Recipe provenance (proven, not invented):
+#   nameistoken/Gemma-4-31B-it-Quark-W8A8-INT8 on HF — same
+#   Gemma4ForConditionalGeneration architecture, measured −0.08pp on
+#   GSM8K vs BF16 (essentially lossless). Scheme: per-channel INT8
+#   weights (ch_axis=0, symmetric, static) + per-token INT8 activations
+#   (ch_axis=1, symmetric, dynamic). Exclusions stay BF16: lm_head,
+#   *embed_tokens*, *vision_tower*, *embed_vision*.
+#   https://huggingface.co/nameistoken/Gemma-4-31B-it-Quark-W8A8-INT8
 #
-# Why FP8 W8A8:
-#   - Halves weight VRAM (48.5 GiB BF16 → ~24 GiB FP8) → frees headroom for
-#     longer KV cache and more concurrent sessions.
-#   - Lifts MoE decode tok/s ~20-40% on gfx942 (MI300X) when served via
-#     AITER FP8 GEMM (VLLM_USE_AITER=1 — set by deploy_droplet.sh).
-#   - Source: AMD Quark blog (kimi-k25-mxfp4-atom, Jul 2026), ppc-fp8-rocm.
-#
-# Why this calibration set:
-#   - Quark needs ~64-512 short sequences to compute per-tensor activation
-#     ranges before rounding weights to FP8. Generic WikiText works but
-#     the agent's traffic is shopping queries + catalog descriptions — we
-#     want activation ranges from the same distribution we actually serve.
-#   - We seed from the 5 SAMPLE_SCENARIOS in bench/run_agent_bench.py plus
-#     titles from the catalog. Deterministic, committed, reproducible.
+# Quark 0.12 API drift (vs the 0.11 recipe in that HF repo):
+#   - amd_quark.tools.quark_quantize CLI        -> removed, use Python API
+#   - quark.torch.quantization.config.Config      -> QConfig
+#   - QuantizationConfig                          -> QLayerConfig
+#   - ModelQuantizer.export_model()               -> quark.torch.export_safetensors()
 #
 # Tool-call accuracy gate (the make-or-break check):
-#   - After quantizing, deploy with VLLM_FP8_MODEL=/models/gemma-4-26B-A4B-it-fp8
-#     and re-run bench/run_5_queries.py against the 5 scenarios.
+#   - After quantizing, deploy with VLLM_FP8_MODEL=/models/gemma-4-26B-A4B-it-int8
+#     and re-run bench/run_agent_bench.py from the laptop.
 #   - Pass criteria: same finalize_recommendations pass rate as BF16; no
 #     provenance_blocked non-empty where baseline was empty.
-#   - If gate fails: revert to BF16, document the rejection in
-#     DEPLOYMENT_JOURNAL.md per PR #7's "Production recommendation remains
-#     FP16" pattern. The rejection is publishable, not a failure.
+#   - If gate fails: revert to BF16, document the rejection per PR #7's
+#     "Production recommendation remains FP16" pattern.
 #
-# Env overrides (with defaults):
-#   FP8_OUT      = /models/gemma-4-26B-A4B-it-fp8
-#   CALIB_OUT    = /root/retailconcierge_calib.jsonl
-#   NUM_CALIB    = 256        # Quark's recommended default
-#   SKIP_CALIB   = 0          # set 1 if you've already produced CALIB_OUT
+# Run on the droplet (the script must live there; app/DB stay on laptop):
+#   ssh root@<droplet-ip>
+#   docker exec -it rocm bash
+#   bash /root/quantize_fp8.sh
 #
-# Pre-flight: Quark 0.12+ must be installed in the container.
-#   docker exec rocm pip show amd-quark  ||  pip install "amd-quark>=0.12"
-# Verified CLI shape against:
-#   https://quark.docs.amd.com/  (versions.html dated 2026-07-03 → 0.12)
-#   https://docs.vllm.ai/stable/features/quantization/quark/ (dated 2026-05-15)
+# Env overrides:
+#   QUARK_OUT  = /models/gemma-4-26B-A4B-it-int8
 
 set -euo pipefail
 
 CTR_NAME="${CTR_NAME:-rocm}"
-BF16_CACHE="/root/.cache/huggingface/hub/models--google--gemma-4-26B-A4B-it"
-# The catalog DB does NOT live on the droplet (architecture boundary).
-# If you need live-catalog calibration, build it on the laptop and scp the
-# resulting JSONL; set DB only when you genuinely have a DB reachable from
-# the container (e.g. a shared mount). Default: empty = skip catalog titles,
-# use the SAMPLE_SCENARIOS prompts only.
-DB="${DB:-}"
-FP8_OUT="${FP8_OUT:-/models/gemma-4-26B-A4B-it-fp8}"
-CALIB_OUT="${CALIB_OUT:-/root/retailconcierge_calib.jsonl}"
-NUM_CALIB="${NUM_CALIB:-256}"
-SKIP_CALIB="${SKIP_CALIB:-0}"
+QUARK_OUT="${QUARK_OUT:-/models/gemma-4-26B-A4B-it-int8}"
 
 ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 log() { printf '[%s] %s\n' "$(ts)" "$*"; }
 die() { printf '[%s] FATAL: %s\n' "$(ts)" "$*" >&2; exit "${2:-1}"; }
 
-# ─── preflight ───────────────────────────────────────────────────────────────
-log "[1/4] Preflight: Quark + BF16 cache inside container $CTR_NAME"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── [1/4] preflight: Quark + BF16 source in container ───────────────────────
+log "[1/4] Preflight: Quark + BF16 source inside $CTR_NAME"
+
+# Copy the BF16 locator helper into the container. Standalone .py avoids
+# the multi-layer shell-quoting hell of inline python3 -c inside docker
+# exec inside bash -c.
+docker cp "$SCRIPT_DIR/_find_bf16.py" "$CTR_NAME":/tmp/_find_bf16.py 2>/dev/null || \
+    docker exec "$CTR_NAME" sh -c "cat > /tmp/_find_bf16.py" < "$SCRIPT_DIR/_find_bf16.py" 2>/dev/null || \
+    die "could not copy _find_bf16.py into container $CTR_NAME"
 
 docker exec "$CTR_NAME" bash -c '
-    python3 -c "import amd_quark" 2>/dev/null \
-        || { echo "amd_quark not installed — run: pip install amd-quark"; exit 1; }
-    python3 -c "
-from huggingface_hub import scan_cache_dir
-hits = [e for e in scan_cache_dir().values() if any(\"gemma-4-26B-A4B-it\" in str(r) for r in [e])]
-if not hits:
-    raise SystemExit(\"BF16 Gemma 4 26B A4B-it not in HF cache — run deploy_droplet.sh first\")
-print(\"BF16 cache OK\")
-"
-' || die "preflight failed — install Quark and verify cache"
-
-# ─── [2/4] build calibration set from agent's natural traffic ────────────────
-log "[2/4] Building calibration set → $CALIB_OUT"
-
-if [ "$SKIP_CALIB" = "1" ] && docker exec "$CTR_NAME" test -s "$CALIB_OUT"; then
-    log "    SKIP_CALIB=1 — reusing existing $CALIB_OUT"
-else
-    # Calibration set is built inside the container so it sees the same
-    # Python env (huggingface_hub, sqlite3, json, random) and the same
-    # catalog DB the agent will serve from. python3 -c '...' because
-    # the shell-side heredoc would reformat the long f-string.
-    docker exec "$CTR_NAME" python3 -c "
-import json, random, sys
-from pathlib import Path
-
-NUM_CALIB = $NUM_CALIB
-
-# Seed prompts from bench/run_agent_bench.py SAMPLE_SCENARIOS — same workload
-# the quantization will serve in production. We oversample prompts (40%)
-# and undersample catalog titles (60%) so the activation range reflects
-# both the brief's natural distribution and the catalog's vocabulary.
-PROMPT_FRACTION = 0.40
-
-scenarios = [
-    'I need a lightweight carry-on spinner luggage with four wheels.',
-    'Find noise cancelling over-ear headphones with strong noise reduction.',
-    'I need a 27-inch computer monitor for office work.',
-    'Recommend a laptop backpack for daily commuting.',
-    'Find a mechanical gaming keyboard with RGB lighting.',
-]
-prompt_quota = max(1, int(NUM_CALIB * PROMPT_FRACTION))
-catalog_quota = NUM_CALIB - prompt_quota
-
-# Catalog titles pulled live from the same DB the agent queries.
-catalog_titles = []
-try:
-    import sqlite3
-    conn = sqlite3.connect('$DB')
-    cur = conn.cursor()
-    catalog_titles = [
-        r[0] for r in cur.execute(
-            'SELECT title_en FROM listings WHERE title_en IS NOT NULL'
-        ).fetchall()
-        if r and r[0]
-    ]
-    conn.close()
-except Exception as exc:
-    print('WARN: could not read catalog titles:', exc, file=sys.stderr)
-
-# Build the quota with sampling-with-replacement so we always hit NUM_CALIB
-# regardless of how many unique catalog titles we have. This is fine for
-# activation-range calibration: Quark only needs ~64-512 short sequences,
-# duplicate tokens are normal.
-random.seed(20260801)
-samples = []
-samples.extend(random.choices(scenarios, k=prompt_quota))
-if catalog_titles:
-    samples.extend(random.choices(catalog_titles, k=catalog_quota))
-else:
-    # Fallback: pad with scenario prompts if catalog reading failed.
-    samples.extend(random.choices(scenarios, k=catalog_quota))
-
-# Interleave by alternating (round-robin), padding the shorter bucket
-# up-front so the tail of the longer bucket gets interleaved too.
-prompts = samples[:prompt_quota]
-catalogs = samples[prompt_quota:]
-interleaved = []
-i = j = 0
-while i < len(prompts) or j < len(catalogs):
-    if i < len(prompts):
-        interleaved.append(prompts[i])
-        i += 1
-    if j < len(catalogs):
-        interleaved.append(catalogs[j])
-        j += 1
-assert len(interleaved) == NUM_CALIB, f'expected {NUM_CALIB}, got {len(interleaved)}'
-
-out_path = Path('$CALIB_OUT')
-out_path.parent.mkdir(parents=True, exist_ok=True)
-with out_path.open('w', encoding='utf-8') as f:
-    for s in interleaved:
-        f.write(json.dumps({'text': s}) + '\n')
-print(f'wrote {len(interleaved)} samples ({prompt_quota} prompts + {catalog_quota} catalog) to {out_path}')
-" || die "calibration set build failed"
-    log "    Calibration set ready"
-fi
-
-# ─── [3/4] Quark quantization ────────────────────────────────────────────────
-# Verify CLI shape against https://quark.docs.amd.com/ before running.
-# As of Aug 2026 the relevant flags are below; pin versions in CI later.
-log "[3/4] Quark FP8 W8A8 → $FP8_OUT"
-
-docker exec "$CTR_NAME" bash -c "
-    mkdir -p $(dirname '$FP8_OUT')
-    # Resolve the snapshot path dynamically — HF cache snapshots change.
-    BF16_PATH=\$(python3 -c \"
-from huggingface_hub import scan_cache_dir
-for repo in scan_cache_dir().values():
-    for rev in repo.revisions:
-        for fn in rev.files:
-            if 'gemma-4-26B-A4B-it' in str(fn).lower() and fn.rfilename.endswith('model.safetensors.index.json'):
-                print(rev.snapshot_path)
-                break
-\")
-    if [ -z \"\$BF16_PATH\" ]; then
-        echo 'FATAL: could not resolve BF16 Gemma 4 26B A4B snapshot' >&2
+    python3 -c "import quark; print(\"quark\", quark.__version__)" 2>/dev/null \
+        || { echo "quark not installed — run: pip install amd-quark"; exit 1; }
+    python3 /tmp/_find_bf16.py > /tmp/bf16_path.txt
+    if [ ! -s /tmp/bf16_path.txt ]; then
+        echo "BF16 Gemma 4 26B A4B-it not in HF cache — run deploy_droplet.sh first" >&2
         exit 1
     fi
-    echo \"BF16 source: \$BF16_PATH\"
+    echo "BF16 source: $(cat /tmp/bf16_path.txt)"
+    echo "Files: $(ls $(cat /tmp/bf16_path.txt)/*.safetensors | wc -l) safetensors shards"
+' || die "preflight failed — Quark not installed or BF16 model missing"
 
-    # Pin Quark to FP8 W8A8. --quant-scheme and --kv-cache-dtype are the
-    # documented scheme names — verify against current Quark release notes.
-    # Known good example (Quark v0.6+):
-    #   quark quantize \\
-    #     --model-dir \$BF16_PATH \\
-    #     --output-dir '$FP8_OUT' \\
-    #     --quant-scheme w_fp8_a_fp8 \\
-    #     --kv-cache-dtype fp8 \\
-    #     --calib-dataset '$CALIB_OUT' \\
-    #     --num-calib-samples $NUM_CALIB \\
-    #     --batch-size 1
-    # If CLI shape changed in the installed Quark version, this command will
-    # fail with a usage error — that is the signal to re-check
-    # https://quark.docs.amd.com/ before continuing.
-    python3 -m amd_quark.tools.quark_quantize \
-        --model-dir \"\$BF16_PATH\" \
-        --output-dir '$FP8_OUT' \
-        --quant-scheme w_fp8_a_fp8 \
-        --kv-cache-dtype fp8 \
-        --calib-dataset '$CALIB_OUT' \
-        --num-calib-samples $NUM_CALIB \
-        --batch-size 1
-" || die "Quark quantization failed — verify CLI shape at https://quark.docs.amd.com/"
+# ─── [2/4] run W8A8 INT8 quantization ────────────────────────────────────────
+log "[2/4] Quark W8A8 INT8 quantization → $QUARK_OUT"
 
-# ─── [4/4] gate check (human run, not automated) ─────────────────────────────
-log "[4/4] Quantization complete"
+docker cp "$SCRIPT_DIR/_quark_quantize_int8.py" "$CTR_NAME":/tmp/_quark_quantize_int8.py 2>/dev/null || \
+    docker exec "$CTR_NAME" sh -c "cat > /tmp/_quark_quantize_int8.py" < "$SCRIPT_DIR/_quark_quantize_int8.py" 2>/dev/null || \
+    die "could not copy _quark_quantize_int8.py into container $CTR_NAME"
 
+docker exec "$CTR_NAME" env \
+    QUARK_OUT="$QUARK_OUT" \
+    python3 /tmp/_quark_quantize_int8.py \
+    || die "Quark quantization failed — see error above"
+
+# ─── [3/4] verify output ─────────────────────────────────────────────────────
+log "[3/4] Verifying output"
+docker exec "$CTR_NAME" bash -c "
+    if [ ! -d '$QUARK_OUT' ]; then echo 'output dir missing' >&2; exit 1; fi
+    echo 'Output dir: $QUARK_OUT'
+    ls -la '$QUARK_OUT' | head -20
+    echo
+    echo 'Safetensors shards:'
+    ls '$QUARK_OUT'/*.safetensors 2>/dev/null | wc -l
+    echo 'Total size:'
+    du -sh '$QUARK_OUT'
+    echo
+    echo 'quantization_config in config.json:'
+    python3 -c \"
+import json
+cfg = json.load(open('$QUARK_OUT/config.json'))
+qc = cfg.get('quantization_config')
+print(json.dumps(qc, indent=2)[:800] if qc else 'MISSING — not vLLM-loadable!')
+\"
+" || die "output verification failed"
+
+# ─── [4/4] next steps ────────────────────────────────────────────────────────
 cat <<EOF
 
-Next steps (manual, in order):
+Quantization complete.
 
-  1. Stop the current BF16 vLLM and relaunch serving the FP8 model:
-       VLLM_FP8_MODEL=$FP8_OUT bash scripts/deploy_droplet.sh
+Next steps (manual):
 
-  2. Re-run the tool-calling accuracy gate:
+  1. Deploy serving the INT8 model (from laptop):
+       ssh root@<droplet-ip> "VLLM_FP8_MODEL=$QUARK_OUT bash /root/deploy_droplet.sh"
+
+  2. Run the tool-call accuracy gate (from laptop):
        RETAIL_PROVIDER=vllm \\
-         RETAIL_BASE_URL=http://localhost:8000/v1 \\
-         RETAIL_MODEL=$FP8_OUT \\
-         uv run python bench/run_5_queries.py
+         RETAIL_BASE_URL=http://<droplet-ip>:8000/v1 \\
+         RETAIL_MODEL=$QUARK_OUT \\
+         uv run python bench/run_agent_bench.py
 
-  3. Compare against the BF16 baseline (saved by prior deploy).
-
-  4. Update DEPLOYMENT_JOURNAL.md with measured delta. Either:
-       - Pass: ship FP8, claim the 20-pt quantization bonus in PR body
+  3. Compare against the BF16 baseline (mean 9.6s / median 6.2s, Aug 1).
+     Either:
+       - Pass: ship INT8, claim the quantization bonus in PR body
        - Fail: revert to BF16, document rejection per PR #7 framing
 
-Output dir: $FP8_OUT (consumes ~26 GiB of host disk)
+Note: vLLM 0.23 loads Quark output via --quantization fp8? NO — Quark INT8
+output uses --quantization quark (needs vLLM >= 0.26) OR vLLM may auto-detect
+the quantization_config block. Verify the serve command picks it up.
 EOF
