@@ -76,7 +76,7 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-600}"   # 10 min for model load
 
 # Optional: serve an AMD Quark-quantized FP8 W8A8 checkpoint.
 # Default is to serve the BF16 source model. Build the FP8 model once with
-# scripts/quantize_fp8.sh (runs Quark on the BF16 weights), then set
+# scripts/quantize_int8.sh (runs Quark on the BF16 weights), then set
 # VLLM_FP8_MODEL=/models/gemma-4-26B-A4B-it-fp8 to swap.
 VLLM_FP8_MODEL="${VLLM_FP8_MODEL:-}"
 
@@ -241,7 +241,7 @@ step_start "[4/5] launch vLLM"
 
 # Pick the serving model: prefer FP8 if it's been quantized, else BF16 source.
 # Quark-quantized weights halve weight VRAM and lift MoE decode ~20-40%
-# (see scripts/quantize_fp8.sh for the build pipeline).
+# (see scripts/quantize_int8.sh for the build pipeline).
 #
 # vLLM ≥ 0.26 supports `--quantization quark` directly (reads the
 # `quantization_config` block Quark writes into config.json and picks
@@ -261,7 +261,7 @@ if [ -n "$VLLM_FP8_MODEL" ] && docker exec "$CTR_NAME" test -d "$VLLM_FP8_MODEL"
     else
         SERVED_FLAGS="--quantization fp8 --kv-cache-dtype fp8"
         log "    WARNING: vLLM $VLLM_VERSION < 0.26 — falling back to --quantization fp8 (no Quark recipe);"
-        log "             see scripts/quantize_fp8.sh TODO on upgrading to vLLM nightly for the Quark path"
+        log "             see scripts/quantize_int8.sh TODO on upgrading to vLLM nightly for the Quark path"
     fi
     log "    Serving Quark-quantized FP8 weights from $VLLM_FP8_MODEL"
 else

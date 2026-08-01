@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/quantize_fp8.sh
+# scripts/quantize_int8.sh
 #
 # ARCHITECTURE BOUNDARY: the catalog DB and app stay on the developer's
 # laptop. This script runs on the GPU droplet and quantizes the BF16 model
@@ -36,7 +36,7 @@
 # Run on the droplet (the script must live there; app/DB stay on laptop):
 #   ssh root@<droplet-ip>
 #   docker exec -it rocm bash
-#   bash /root/quantize_fp8.sh
+#   bash /root/quantize_int8.sh
 #
 # Env overrides:
 #   QUARK_OUT  = /models/gemma-4-26B-A4B-it-int8
