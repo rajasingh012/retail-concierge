@@ -133,34 +133,41 @@ The CLI creates one `AgentSession` and reuses it until the user exits. MAF store
 
 ## Audit log
 
-Every catalog and finalizer tool call writes one entry to an append-only JSONL file. Each entry links to the previous one via `prev_hash`/`entry_hash`; `extract_brief` is not recorded.
+A judge, regulator, or customer can ask: *"What did the concierge actually access in this session, and can a third party prove it without trusting our codebase?"* The audit log answers both questions: every catalog or finalizer tool call writes one entry to an append-only JSONL file, and the entries form a tamper-evident hash chain verifiable by a stdlib-only script.
+
+### Hash chain (one entry per tool call)
+
+Each entry links to the previous via `prev_hash`/`entry_hash`. Edit any line, delete any line, or reorder any line — and `audit_verify.py` exits 1 with the offending line number.
 
 ```mermaid
 flowchart LR
-  G["genesis<br/>prev_hash = 0…0"]
-  E1["entry 1<br/>prev_hash=0…0<br/>entry_hash=H1"]
-  E2["entry 2<br/>prev_hash=H1<br/>entry_hash=H2"]
-  E3["entry 3<br/>prev_hash=H2<br/>entry_hash=H3"]
-  E4["entry 4<br/>prev_hash=H3<br/>entry_hash=H4"]
+  G["entry 1<br/>prev_hash = 0…0<br/>(genesis)"]
+  E1["entry 2<br/>prev_hash = H1"]
+  E2["entry 3<br/>prev_hash = H2"]
+  E3["entry 4<br/>prev_hash = H3"]
   V["audit_verify.py<br/>exit 0 = clean<br/>exit 1 = tampered"]
 
-  G -. "seq=1 requires<br/>prev_hash=0…0" .-> E1
-  E1 -- "prev_hash=H1<br/>must equal computed" --> V
-  E2 -- "prev_hash=H2" --> V
-  E3 -- "prev_hash=H3" --> V
-  E4 -- "prev_hash=H4<br/>chain head" --> V
-  E1 -- "entry_hash=H1" --> E2
-  E2 -- "entry_hash=H2" --> E3
-  E3 -- "entry_hash=H3" --> E4
+  G -- "entry_hash = H1" --> E1
+  E1 -- "entry_hash = H2" --> E2
+  E2 -- "entry_hash = H3" --> E3
+  E3 -- "chain head" --> V
+  V -- "re-hash every entry<br/>confirm prev_hash links" --> G
+  V -- "re-hash every entry<br/>confirm prev_hash links" --> E1
+  V -- "re-hash every entry<br/>confirm prev_hash links" --> E2
+  V -- "re-hash every entry<br/>confirm prev_hash links" --> E3
 ```
+
+### Provenance gate artifact (what gets logged per finalize call)
+
+When `finalize_recommendations` runs, the log records the full picture: every item_id the model proposed, every item_id that survived the gate, and — crucially — every item_id the model tried to slip in that wasn't actually returned by `search_catalog` in this session. A clean log has empty `provenance_blocked`; a populated one is the audit story.
 
 ```mermaid
 flowchart LR
-  proposed["model proposes to<br/>finalize_recommendations"]
+  proposed["model proposes<br/>to finalize_recommendations"]
   tracker["session tracker<br/>(item_ids from search_catalog)"]
   gate["provenance gate<br/>drop ∉ tracker"]
-  accepted["accepted_item_ids<br/>(ranked, displayed)"]
-  blocked["provenance_blocked<br/>(audit only,<br/>never displayed)"]
+  accepted["accepted_item_ids<br/>displayed to user"]
+  blocked["provenance_blocked<br/>audit-only,<br/>never displayed"]
 
   proposed --> gate
   tracker --> gate
@@ -168,4 +175,4 @@ flowchart LR
   gate -- "not in tracker" --> blocked
 ```
 
-Verify with `python scripts/audit_verify.py retail_audit.jsonl` (stdlib only, no project deps). Opt-in via `RETAIL_AUDIT_LOG=./retail_audit.jsonl`. Implementation: `infrastructure/audit.py`, `scripts/audit_verify.py`; tests in `tests/test_audit_log.py`.
+Opt-in via `RETAIL_AUDIT_LOG=./retail_audit.jsonl`. Verify with `python scripts/audit_verify.py retail_audit.jsonl` (stdlib only, works on the demo droplet without a venv). Implementation: `infrastructure/audit.py`, `scripts/audit_verify.py`; tests in `tests/test_audit_log.py`.
