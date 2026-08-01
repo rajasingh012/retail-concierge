@@ -85,6 +85,9 @@ def main() -> None:
     )
 
     # Quark 0.12 renamed 0.11's Config/QuantizationConfig to QConfig/QLayerConfig.
+    # MoE-aware exclusions: keep the router + experts + shared experts BF16.
+    # The 31B-dense recipe (no MoE) quantized everything; on our 26B MoE the
+    # router/expert scale handling corrupts output (verified empirically).
     q_cfg = QConfig(
         global_quant_config=QLayerConfig(
             input_tensors=input_spec,
@@ -95,6 +98,10 @@ def main() -> None:
             "*embed_tokens*",
             "*vision_tower*",
             "*embed_vision*",
+            "*router*",
+            "*experts*",
+            "*shared_experts*",
+            "*moe*",
         ],
     )
 

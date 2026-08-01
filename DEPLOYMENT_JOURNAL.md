@@ -169,3 +169,22 @@ The safetensors key is `model.language_model.layers.0.router.proj.weight_scale` 
 **Verdict:** Our quantization is correct. The blocker is vLLM 0.23's Quark-MoE loader. Fix requires vLLM ≥ 0.26 (Quark MoE support matured) — the AMD 1-Click image ships 0.23. Deferred, documented per PR #7's "production recommendation remains FP16" framing.
 
 **Status:** INT8 model saved at `/models/gemma-4-26B-A4B-it-int8` (droplet), BF16 server restored as default. Revisit post-submission with vLLM ≥ 0.26.
+
+### Issue 12: vLLM 0.26 upgrade — version wall fixed, Quark INT8 still corrupts MoE output
+**Date:** 2026-08-01
+
+**Goal:** Serve the Quark INT8 checkpoint by upgrading vLLM past the 0.23 MoE loader bug (`KeyError: 'layers.0.router.proj.weight_scale'`).
+
+**Upgrade path (AMD-sanctioned, researched):** AMD's `ROCm/vllm` fork is officially deprecated (2025-09-09); AMD points to upstream vLLM's ROCm wheel index. Installed `vllm==0.26.0+rocm723` from `wheels.vllm.ai/rocm/0.26.0/rocm723/` via `uv pip install --system` inside the container. ABI fixes along the way: uninstalled `flash-attn` (torch 2.11 ABI mismatch on `getCurrentHIPStream`) and `torchaudio` (libc10 mismatch).
+
+**Result 1 — version wall FIXED:** vLLM 0.26 loads the Quark INT8 checkpoint (no KeyError). Model loads at 25.75 GiB (vs 49.79 BF16). Torch.compile first-boot is slow (~13 min) but warm-cache boots are fast.
+
+**Result 2 — quantization FAILS quality on MoE:** INT8 output is garbage (`1-1-1-1-0-1-0-1-0-1-s-s-s-1-s-` for "What is 2+2"). Tested twice:
+- (a) 31B-dense recipe as-is (everything quantized except lm_head/embeddings/vision): garbage
+- (b) MoE-aware exclusions added (`*router*`, `*experts*`, `*shared_experts*`, `*moe*` kept BF16): **still garbage**
+
+The W8A8 INT8 scheme works on the 31B dense (proven −0.08pp GSM8K) but corrupts the 26B A4B MoE. The corruption is not in the router/expert scales (exclusion didn't help) — likely the dynamic per-token activation quantization interacting with the MoE layer shapes, or the scale layout vLLM 0.26's loader expects vs what Quark exports for shared-expert paths.
+
+**Verdict (final):** Quark W8A8 INT8 quantization is NOT viable for the 26B A4B MoE. The 20-pt quantization bonus is not claimable. Documented per PR #7's honest-rejection framing. Future work (post-submission): try static activation quantization with calibration data, or FP8 (`fp8_e4m3`) instead of INT8.
+
+**Status:** BF16 restored as serving default on the vLLM 0.26 droplet (parity verified, mean 9.5s). INT8-MoE experiment closed with documented negative result.
