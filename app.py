@@ -32,8 +32,19 @@ def get_agent():
     repo = ABOCatalogRepository(db_path)
     client = build_chat_client(provider, model)
     tracker = CatalogEvidenceTracker()
-    catalog_tools = build_tools(repo, catalog_tracker=tracker)
-    agent = build_shopping_agent(client, catalog_tools, tracker=tracker, provider=provider)
+    audit_logger = None
+    audit_path = os.getenv("RETAIL_AUDIT_LOG")
+    if audit_path:
+        from infrastructure.audit import AuditLogger
+        audit_logger = AuditLogger(Path(audit_path))
+    catalog_tools = build_tools(repo, catalog_tracker=tracker, audit_logger=audit_logger)
+    agent = build_shopping_agent(
+        client,
+        catalog_tools,
+        tracker=tracker,
+        provider=provider,
+        audit_logger=audit_logger,
+    )
 
     stats = repo.stats()
     return agent, repo, stats

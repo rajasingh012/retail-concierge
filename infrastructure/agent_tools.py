@@ -73,8 +73,17 @@ def build_tools(
     repository: ABOCatalogRepository,
     *,
     catalog_tracker: Any = None,
+    audit_logger: Any = None,
 ) -> list[Any]:
-    """Build MAF tools over the catalog. Optionally record observed item_ids."""
+    """Build MAF tools over the catalog. Optionally record observed item_ids.
+
+    Args:
+        repository: ABO catalog repository.
+        catalog_tracker: Per-session item-id tracker; enforces
+            provenance-gating in ``finalize_recommendations``.
+        audit_logger: Optional ``AuditLogger`` instance. When set, every
+            tool invocation writes one hash-chained JSONL entry.
+    """
     db_path = str(repository._conn)
     repo_namespace = f"{_CATALOG_NAMESPACE}::{db_path}"
 
@@ -90,6 +99,14 @@ def build_tools(
             if isinstance(item, dict) and item.get("item_id")
         ]
         record(item_ids)
+
+    def _audit(tool: str, args: dict, result_meta: dict) -> None:
+        if audit_logger is None:
+            return
+        record = getattr(audit_logger, "record", None)
+        if record is None:
+            return
+        record(tool, args, result_meta)
 
     @tool(
         name="find_product_types",
@@ -113,11 +130,15 @@ def build_tools(
             [repo_namespace, "find_product_types", query, safe_limit],
             ensure_ascii=False,
         )
+        types = repository.find_product_types(query, safe_limit)
+        _audit(
+            "find_product_types",
+            {"query": query, "limit": safe_limit},
+            {"result_count": len(types)},
+        )
         return _cached(
             key,
-            lambda: json.dumps(
-                repository.find_product_types(query, safe_limit), ensure_ascii=False
-            ),
+            lambda: json.dumps(types, ensure_ascii=False),
         )
 
     @tool(
@@ -143,11 +164,15 @@ def build_tools(
             [repo_namespace, "find_brands", query, safe_limit],
             ensure_ascii=False,
         )
+        brands = repository.find_brands(query, safe_limit)
+        _audit(
+            "find_brands",
+            {"query": query, "limit": safe_limit},
+            {"result_count": len(brands)},
+        )
         return _cached(
             key,
-            lambda: json.dumps(
-                repository.find_brands(query, safe_limit), ensure_ascii=False
-            ),
+            lambda: json.dumps(brands, ensure_ascii=False),
         )
 
     @tool(
@@ -216,6 +241,19 @@ def build_tools(
             )
         ]
         _record_observed(candidates)
+        item_ids = [
+            c.get("item_id") for c in candidates if isinstance(c, dict) and c.get("item_id")
+        ]
+        _audit(
+            "search_catalog",
+            {
+                "query": query,
+                "product_type": product_type,
+                "max_dimension_cm": max_dimension_cm,
+                "limit": safe_limit,
+            },
+            {"result_count": len(candidates), "item_ids": item_ids},
+        )
         return _cached(
             key,
             lambda: json.dumps(candidates, ensure_ascii=False),

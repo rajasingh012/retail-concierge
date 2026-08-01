@@ -25,6 +25,7 @@ from use_cases.shopping_agent import (
 DEFAULT_PROVIDER = "deepseek"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_DB = Path("./retail_catalog.db")
+DEFAULT_AUDIT_LOG = Path("./retail_audit.jsonl")
 
 
 def resolve_client():
@@ -126,8 +127,21 @@ async def run_chat() -> None:
     provider = os.getenv("RETAIL_PROVIDER", DEFAULT_PROVIDER)
     client = resolve_client()
     tracker = CatalogEvidenceTracker()
-    catalog_tools = _build_catalog_tools(repository, catalog_tracker=tracker)
-    agent = build_shopping_agent(client, catalog_tools, tracker=tracker, provider=provider)
+    audit_logger = None
+    audit_path = os.getenv("RETAIL_AUDIT_LOG")
+    if audit_path:
+        from infrastructure.audit import AuditLogger
+        audit_logger = AuditLogger(Path(audit_path))
+    catalog_tools = _build_catalog_tools(
+        repository, catalog_tracker=tracker, audit_logger=audit_logger
+    )
+    agent = build_shopping_agent(
+        client,
+        catalog_tools,
+        tracker=tracker,
+        provider=provider,
+        audit_logger=audit_logger,
+    )
     session = agent.create_session()
     stats = repository.stats()
 

@@ -136,3 +136,21 @@ The CLI creates one `AgentSession` and reuses it until the user exits. MAF store
 - catalog-tool cache hits and misses
 - AMD GPU snapshots when available
 - vLLM metrics when available
+
+## Audit log
+
+Every catalog and finalizer tool call writes one entry to an append-only JSONL file. Each line is JSON with `seq`, `ts`, `session_id`, `tool`, `args`, `result_meta`, `prev_hash`, and `entry_hash` where `entry_hash = sha256(canonical_json(entry_without_entry_hash))`. Each entry's `prev_hash` links to the previous entry's `entry_hash`; the chain head is the most recent `entry_hash`. Genesis is 64 zeros. `canonical_json` is deterministic (sorted keys, UTF-8, no ASCII escapes, NaN/Inf rejected) so equal entries always hash equal.
+
+Four tools are recorded: `find_product_types`, `find_brands`, `search_catalog`, and `finalize_recommendations`. `extract_brief` is not recorded — it has no external-data semantics. Each call uses a single write with `fsync`, so the file on disk always reflects the last completed entry. The logger holds a process-level lock around writes and refuses to reopen over a corrupt tail.
+
+The logger is opt-in. Set `RETAIL_AUDIT_LOG=./retail_audit.jsonl` (or any path) to enable; leave unset for no behavior change. The `main.py` and `app.py` composition roots construct an `infrastructure.audit.AuditLogger` only when the environment variable is present, and pass it through `build_tools` and `build_shopping_agent`.
+
+`finalize_recommendations` records three fields that matter for the audit story:
+
+- `proposed_item_ids` — every item_id the model fed to the tool this call.
+- `accepted_item_ids` — what survived the provenance gate and ranking, in authoritative order.
+- `provenance_blocked` — `proposed - tracker.snapshot()`, i.e. item_ids the model tried to put on the list that were not actually returned by `search_catalog` in this session. Empty list means the model stayed within the catalog.
+
+A separate `provenance_blocked` field is the only artifact that proves the gate had anything to catch, and the hash chain is what proves the log itself was not edited afterwards.
+
+Verify with `python scripts/audit_verify.py retail_audit.jsonl` (stdlib only, no project deps, works on the demo droplet without a venv). Exit 0 means the chain is intact; exit 1 means a violation was found (line edit, line delete, reorder, or seq skip). `--summary` emits a machine-readable JSON report.

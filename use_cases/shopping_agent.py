@@ -143,6 +143,7 @@ def _build_agent_tools(
     catalog_tools: list[Any],
     *,
     tracker: CatalogEvidenceTracker,
+    audit_logger: Any = None,
 ) -> list[Any]:
     """Compose the tool list for the shopping agent.
 
@@ -153,7 +154,7 @@ def _build_agent_tools(
     return [
         _make_extract_brief_tool(),
         *catalog_tools,
-        _make_finalize_tool(tracker),
+        _make_finalize_tool(tracker, audit_logger=audit_logger),
     ]
 
 
@@ -163,6 +164,7 @@ def build_shopping_agent(
     *,
     tracker: CatalogEvidenceTracker | None = None,
     provider: str = "",
+    audit_logger: Any = None,
 ) -> Agent:
     """Build the one MAF agent used for every turn in a shopping session.
 
@@ -176,6 +178,8 @@ def build_shopping_agent(
             merged into ``default_options``. Unknown extras on a different
             provider are forwarded in ``extra_body`` and silently ignored
             by the server.
+        audit_logger: Optional ``AuditLogger``; finalize_recommendations
+            records one entry per call with the screening outcomes.
     """
     tracker = tracker or CatalogEvidenceTracker()
     provider_options = provider_extras(provider) if provider else {}
@@ -189,18 +193,22 @@ def build_shopping_agent(
     return Agent(
         client=client,
         instructions=SHOPPING_AGENT_INSTRUCTIONS,
-        tools=_build_agent_tools(catalog_tools, tracker=tracker),
+        tools=_build_agent_tools(
+            catalog_tools, tracker=tracker, audit_logger=audit_logger
+        ),
         default_options=default_options,
     )
 
 
-def build_finalize_recommendations_tool():
+def build_finalize_recommendations_tool(
+    audit_logger: Any = None,
+):
     """Build the deterministic finalization tool and its bound tracker."""
     tracker = CatalogEvidenceTracker()
-    return _make_finalize_tool(tracker), tracker
+    return _make_finalize_tool(tracker, audit_logger=audit_logger), tracker
 
 
-def _make_finalize_tool(tracker: CatalogEvidenceTracker):
+def _make_finalize_tool(tracker: CatalogEvidenceTracker, audit_logger: Any = None):
     @tool(
         name=FINALIZE_RECOMMENDATIONS_TOOL,
         description=(
@@ -213,10 +221,33 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker):
         candidates: list[dict[str, Any]],
     ) -> dict[str, list[dict[str, Any]]]:
         """Screen product identity and deterministically rank exact products."""
+        seen = tracker.snapshot()
+        proposed_item_ids = [
+            str(c.get("item_id"))
+            for c in candidates
+            if isinstance(c, dict) and c.get("item_id")
+        ]
         result = screen_and_rank_candidates(
             {"candidates": candidates},
-            allowed_item_ids=tracker.snapshot(),
+            allowed_item_ids=seen,
         )
+        accepted_item_ids = [c.item_id for c in result["candidates"]]
+        if audit_logger is not None:
+            record = getattr(audit_logger, "record", None)
+            if record is not None:
+                record(
+                    FINALIZE_RECOMMENDATIONS_TOOL,
+                    {"proposed_item_ids": proposed_item_ids},
+                    {
+                        "accepted_item_ids": accepted_item_ids,
+                        "provenance_blocked": [
+                            item_id
+                            for item_id in proposed_item_ids
+                            if item_id not in seen
+                        ],
+                        "result_count": len(accepted_item_ids),
+                    },
+                )
         # MAF serializes tool returns through a generic JSON encoder that does
         # not understand Pydantic; model_dump explicitly so the wire format is
         # a plain dict (which MAF round-trips losslessly).
@@ -226,6 +257,7 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker):
         return result
 
     finalize_recommendations._catalog_tracker = tracker  # type: ignore[attr-defined]
+    finalize_recommendations._audit_logger = audit_logger  # type: ignore[attr-defined]
     return finalize_recommendations
 
 
