@@ -23,36 +23,53 @@ Every second must serve one of the two judging buckets. The video is 60% "the ag
 
 ## Act 1 — Hook (0:00 – 0:25)
 
-**On screen:** split view — left: `main.py` console booting; right: `amd-smi` showing MI300X.
+**Split into two recording sessions** (one per machine, cleaner evidence + easier editing):
 
-**Narration:** SRT cue 1.
+- **Phase 1 — this session, GPU droplet only**: cues 1, 5, 7 (the AMD-native inference evidence)
+- **Phase 2 — next session, laptop only**: cues 2, 3, 4, 6, 8 (the agent behavior)
 
-**Do:** one clean boot line visible — the app prints `145,615 products / 576 product types; model=...`. This is the "functional completeness" opener.
+The narration audio (`demo_narration.mp3`) is the master for both phases; the SRT anchors it. Final splice in the next session: take the video from Phase 1, lay it on top of the audio timeline at the cue positions (1/5/7) with black/blank space where the laptop footage will go (2/3/4/6/8). Phase 2 will fill those gaps and replace the blanks with the agent-on-laptop footage. **OR** simpler: record both as one continuous 2:32 video with the GPU terminal visible in the top half and the laptop agent terminal in the bottom half for the agent cues — judge reads "two things, one proof" instantly.
 
 ---
 
-## Act 2 — The agent works (0:25 – 1:40)
+## Act 1 — Hook (0:00 – 0:25) [PHASE 1 — GPU droplet]
 
-**On screen:** console app, live. Type each query, narrate as it happens. Show the tool calls in the agent's trace if the app prints them (or overlay a small terminal with `--verbose`-style tool trace).
+**On screen:** the SSH session in the GPU droplet. Boot banner + first real `rocm-smi` output + first chat completion to vLLM.
 
-**Query 1 — full recommendation flow (0:25 – 0:55):**
+**Narration:** SRT cue 1.
+
+**Do:** show the app/model on AMD hardware first. Commands (paste via xclip, then `xdotool key Return`):
+
+```bash
+# 1. Confirm we're on the GPU droplet
+hostname; uname -a | head -1
+# 2. AMD GPU info (the visual proof)
+rocm-smi --showproductname
+# 3. Model served on AMD
+docker exec rocm curl -s http://localhost:8000/v1/models | python3 -m json.tool | head -15
+# 4. Live chat completion to vLLM (proves inference works)
+docker exec rocm curl -s -X POST http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"/models/gemma-4-12b-it-int8","messages":[{"role":"user","content":"Hello"}],"max_tokens":20}' \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("model:",d["model"]); print("reply:",d["choices"][0]["message"]["content"][:80])'
+```
+
+---
+
+## Act 2 — The agent works (0:25 – 1:40) [PHASE 2 — laptop only, next session]
+
+**On screen:** the console app on the laptop, hitting the droplet's vLLM.
+
+**Queries to type in the laptop agent:**
+
 ```
 you> a pair of wireless earbuds under 5k rupees
-```
-**Narration:** SRT cue 2. Let the 5 recommendations render. Point at one reason line: each recommendation carries "why it fits" and "trade-offs" — no invented prices, no fake availability.
-
-**Query 2 — clarification, the agentic behavior (0:55 – 1:15):**
-```
 you> I want something for my trip.
-```
-**Narration:** SRT cue 3. The agent asks: what kind of items, budget, etc.
-
-**Query 3 — refinement chips, multi-turn memory (1:15 – 1:40):**
-```
 you> stainless steel water bottle 1L
-you> [2]   ← pick a refinement chip (e.g., "Vacuum Insulated")
+you> [2]   ← pick a refinement chip
 ```
-**Narration:** SRT cue 4. (Optional if time is tight — skip to Act 3 if over 1:40.)
+
+**Narration:** SRT cues 2, 3, 4.
 
 **Act 2 purpose:** prove 60 pts — tool use, reasoning, memory, task execution, practical value.
 
@@ -60,32 +77,67 @@ you> [2]   ← pick a refinement chip (e.g., "Vacuum Insulated")
 
 ## Act 3 — It's real AMD: GPU + speed (1:40 – 3:10)
 
-**On screen:** split — top: `amd-smi monitor` (live utilization + VRAM); bottom: a `curl` request to the vLLM endpoint or a second terminal running `benchmark_concurrency.sh`.
+### 3a. Live inference on GPU (1:40 – 2:10) [PHASE 1 — GPU droplet]
 
-**3a. Live inference on GPU (1:40 – 2:10):**
-Run one query; while it generates, point at `amd-smi`:
-- GPU utilization jumping during decode
-- VRAM usage (the INT8 model: ~12.5 GiB weights — say it out loud)
-- **Narration:** SRT cue 5.
+**On screen:** while a chat completion is in flight, `rocm-smi --showuse` shows utilization spiking. Run the request, watch the GPU respond.
 
-**3b. The speed numbers (2:10 – 2:50):**
-Run `benchmark_concurrency.sh` (concurrency 1→2→4→8) or show a pre-generated table.
+**Narration:** SRT cue 5.
+
+**Commands:**
+
+```bash
+# 1. Start amd-smi polling in the foreground (shows GPU spiking during inference)
+rocm-smi --showuse --csv
+# 2. In another terminal / while this runs, fire a real chat completion
+#    (this is the visual proof of "every token generated on AMD")
+docker exec rocm curl -s -X POST http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"/models/gemma-4-12b-it-int8","messages":[{"role":"user","content":"Recommend 3 wireless earbuds in one paragraph."}],"max_tokens":120,"temperature":0}' \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("usage:",d["usage"]); print("reply:",d["choices"][0]["message"]["content"][:200])'
+# 3. Show VRAM (proves the INT8 size on GPU)
+rocm-smi --showmeminfo vram --csv
+```
+
+### 3b. The speed numbers (2:10 – 2:50) [PHASE 2 — laptop, with droplet serving]
+
+**On screen:** the concurrency bench output (concurrency 1/2/4/8) on the laptop, hitting the GPU droplet. The bench proves the AMD serving layer holds up.
+
 **Narration:** SRT cue 6.
 
-**3c. The quantization optimization (2:50 – 3:10):**
-Show the INT8 checkpoint + one command:
+**Commands on the laptop:**
+
+```bash
+BASE_URL=http://129.212.185.54:8000/v1 MODEL=google/gemma-4-12b-it \
+  bash scripts/benchmark_concurrency.sh
 ```
-ssh root@<ip> "VLLM_FP8_MODEL=/models/gemma-4-12b-it-int8 bash deploy_droplet.sh"
-```
+
+### 3c. The quantization optimization (2:50 – 3:10) [PHASE 1 — GPU droplet]
+
+**On screen:** show the INT8 checkpoint on the droplet + the Quark quantization_config block.
+
 **Narration:** SRT cue 7.
+
+**Commands:**
+
+```bash
+# 1. The actual INT8 checkpoint on AMD
+ls -la /models/gemma-4-12b-it-int8/
+du -sh /models/gemma-4-12b-it-int8/
+# 2. The Quark quantization config (proves what scheme we used)
+python3 -c "import json; print(json.dumps(json.load(open('/models/gemma-4-12b-it-int8/config.json'))['quantization_config'], indent=2)[:600])"
+# 3. The vLLM serve command that loads it (proves the AMD-native serving path)
+docker exec rocm ps auxf | grep -E "vllm serve" | grep -v grep | head -1
+# 4. The serving line proves Quark + ROCm 0.26
+docker exec rocm bash -lc "vllm --version; python3 -c 'import quark; print(\"Quark\",quark.__version__)'"
+```
 
 **Act 3 purpose:** prove the 40 pts — local inference on AMD, ROCm, and measurable speed optimization (quantization, prefix caching, chunked prefill, concurrency).
 
 ---
 
-## Act 4 — Close (3:10 – 3:40)
+## Act 4 — Close (3:10 – 3:40) [PHASE 2 — laptop, repo open in browser]
 
-**On screen:** the repo — `https://github.com/rajasingh012/retail-concierge`, README visible (architecture diagram + scripts).
+**On screen:** the GitHub repo — `https://github.com/rajasingh012/retail-concierge`, README visible (architecture diagram + scripts).
 
 **Narration:** SRT cue 8 (includes: "We also published the quantized model on Hugging Face for anyone to use.").
 
@@ -148,3 +200,32 @@ ffmpeg -i screen-recording.mkv -i demo_narration.mp3 \
 - No failed queries or the escaped-quote corruption.
 - No claim that 12B INT8 is "lossless" — say "1.7x smaller weights, ~1.7x less VRAM" (true) and verify accuracy via the tool-call benchmark before claiming equivalence.
 - Don't exceed 5:00 — hard cap, the rules say recommended 3–5 min.
+
+---
+
+## PHASE 1 STATUS (2026-08-02, done)
+
+- **Recorded + verified:** `docs/phase1_demo.mp4` (2:15, 1920x1080, H.264 + AAC narration)
+- Content: RetailConcierge banner (145,615 products / model=gemma-4-12b-it-int8),
+  rocm-smi (AMD Instinct MI300X VF), vLLM INT8 model list + runtime metrics,
+  13G INT8 checkpoint, Quark quantization_config exclude block, vLLM 0.26+rocm723 /
+  Quark 0.12.post1 / Torch 2.11.0 ROCm versions.
+- All commands executed on the GPU droplet via `docker exec rocm` (model dir is
+  INSIDE the container; host `/models/` does not exist — this cost one failed
+  take, fixed by prefixing every `/models` command with `docker exec rocm`).
+- No failed commands on camera (verified via OCR of 7 sampled frames).
+
+## PHASE 2 PLAN (next session, laptop only — no SSH needed)
+
+Record the agent behavior locally (app hits the droplet's public vLLM API):
+
+1. `uv run python main.py` with RETAIL_PROVIDER=vllm, RETAIL_BASE_URL=http://129.212.185.54:8000/v1,
+   RETAIL_MODEL=/models/gemma-4-12b-it-int8
+2. Query 1 (cue 2, 0:22-0:41): "a pair of wireless earbuds under 5k rupees" → 5 recs
+3. Query 2 (cue 3, 0:42-0:52): "I want something for my trip." → clarification
+4. Query 3 (cue 4, 0:52-1:01): "stainless steel water bottle 1L" → recs + chip
+5. Speed bench (cue 6, 1:15-1:31): `bash scripts/benchmark_concurrency.sh`
+6. Repo close (cue 8, 1:59-2:32): browser/github.com/rajasingh012/retail-concierge
+
+Final assembly: lay Phase 1 video at cue positions 1/5/7, Phase 2 video at 2/3/4/6/8,
+over the single 2:32 narration track (audio is the master).
