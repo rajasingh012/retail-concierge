@@ -34,7 +34,7 @@ For the executable how-to (commands, ordering), see the per-script header commen
 
 ## Known issue (current)
 
-The 26B A4B **MoE** quantization path was removed (2026-08-02): Quark W8A8 INT8 on the MoE produced garbage in 4 attempts (DEPLOYMENT_JOURNAL.md Issues 11–13). The shipped quantization path is **12B dense INT8** (works end-to-end on vLLM 0.26; accuracy gate pending).
+The 26B A4B **MoE** quantization path was removed (2026-08-02): Quark W8A8 INT8 on the MoE produced garbage in 4 attempts (DEPLOYMENT_JOURNAL.md Issues 11–13). The shipped quantization path is **12B dense INT8** (works end-to-end on vLLM 0.26) — the resulting checkpoint is published publicly at **[`rajasingh012/gemma-4-12b-it-quark-w8a8-int8`](https://huggingface.co/rajasingh012/gemma-4-12b-it-quark-w8a8-int8)** (Hugging Face), the first AMD Quark W8A8 INT8 of Gemma 4 12B. Accuracy gate still pending (GSM8K −0.08pp was measured on the 31B class, not 12B Unified).
 
 Tool-call reliability note: under multi-round agent sessions the 12B occasionally emits plain `"` where the Gemma 4 native `<|"|>` delimiter is expected, and vLLM's gemma4 parser (open bugs #48678/#47909) can corrupt the final `finalize_recommendations` arguments. This is model-generation fidelity under context pressure, not a JSON-capability failure — single-call structured output and direct vLLM requests are clean. See DEPLOYMENT_JOURNAL.md "Root cause resolution".
 

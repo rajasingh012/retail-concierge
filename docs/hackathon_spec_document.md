@@ -76,6 +76,8 @@ Architecture boundary: the app, catalog, and source live on the developer laptop
 | **Gemma 4 12B it (Unified)** | 23.9 GB BF16 → **14 GB INT8** | AMD Quark W8A8 (per-channel weight + per-token dynamic activation) | vLLM 0.26 `--quantization quark` | **Shipped** |
 | Gemma 4 26B A4B MoE (BF16) | 51.6 GB | none (MoE INT8 rejected — see §7) | vLLM 0.26 | fallback |
 
+The 12B INT8 checkpoint is **published publicly on Hugging Face** — [`rajasingh012/gemma-4-12b-it-quark-w8a8-int8`](https://huggingface.co/rajasingh012/gemma-4-12b-it-quark-w8a8-int8) — the first AMD Quark W8A8 INT8 quantization of Gemma 4 12B. Anyone can download and reproduce the inference story (base model: `google/gemma-4-12B-it`; 13 GB weights; model card documents the W8A8 scheme, compression, and accuracy caveats).
+
 **Deployment plan (all repo scripts, reproducible):**
 
 ```

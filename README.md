@@ -48,6 +48,8 @@ The MoE variant uses 3.8B active parameters per token and is **3.69× faster** t
 
 Droplet lifecycle + catalog utilities — see [scripts/README.md](scripts/README.md) for what each script does, where it runs (laptop vs droplet), and the ordering.
 
+**Published quantization:** the Gemma 4 12B W8A8 INT8 checkpoint (AMD Quark) is public on Hugging Face — **[`rajasingh012/gemma-4-12b-it-quark-w8a8-int8`](https://huggingface.co/rajasingh012/gemma-4-12b-it-quark-w8a8-int8)**. It is the first AMD Quark W8A8 INT8 quantization of Gemma 4 12B, produced by `scripts/quantize_int8.sh`, served with vLLM 0.26's `--quantization quark` loader (needs the Quark→vLLM key fixup + `chat_template.jinja` copy, both automated in `scripts/_quark_fix_vllm_keys.py`). Model card covers the W8A8 scheme, the 23.9 GB → 14 GB compression, and an honest accuracy caveat (GSM8K −0.08pp was measured on the 31B class, not 12B Unified).
+
 **Known limitation:** W8A8 INT8 quantization ships on the **12B dense** path (works end-to-end on vLLM 0.26, served via `--quantization quark`). The 26B A4B MoE path was removed — Quark W8A8 INT8 on the MoE produced garbage in 4 attempts (DEPLOYMENT_JOURNAL.md Issues 11-13); the 26B ships as BF16. Accuracy caveat: the 31B-dense baseline (−0.08pp GSM8K) was measured on the older `Gemma4ForConditionalGeneration` class; 12B uses `Gemma4UnifiedForConditionalGeneration` — treat 12B as a fresh run and verify via the tool-call accuracy gate before claiming the quantization bonus. See [scripts/README.md](scripts/README.md).
 
 ## Documentation
