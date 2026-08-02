@@ -1,16 +1,11 @@
-"""Shared helpers for the Quark W8A8 INT8 recipes.
+"""Shared helpers for the Quark W8A8 INT8 recipe.
 
-Extracted from the dense and MoE quantizers. Only what both recipes share
-belongs here: model load, QTensorConfig construction, quantize+freeze, export.
-Architecture-specific logic (exclude lists, expert rewrite, key rename)
-stays in the recipe scripts.
+Model load, QTensorConfig construction, quantize+freeze, export.
+The dense recipe (Gemma 4 12B / 31B Unified) is the only consumer.
 
-Recipes using this:
-- _quark_quantize_dense.py  (Gemma 4 12B dense, excludes tuned for 31B-dense
-                              baseline — nameistoken/Gemma-4-31B-it-Quark-W8A8-INT8)
-- _quark_quantize_moe.py    (Gemma 4 26B A4B MoE — expert rewrite +
-                              post-export key rename per
-                              nameistoken/Qwen3.6-35B-A3B-Quark-W8A8-INT8)
+Recipe provenance: nameistoken/Gemma-4-31B-it-Quark-W8A8-INT8 (HF) —
+measured -0.08pp on GSM8K vs BF16, scheme per-channel INT8 weights +
+per-token dynamic INT8 activations.
 """
 from __future__ import annotations
 
@@ -46,8 +41,7 @@ def load_bf16(model_in: str, model_class):
     """Load BF16 model + tokenizer on MI300X.
 
     `model_class` is the transformers class to instantiate (e.g.
-    Gemma4UnifiedForConditionalGeneration for 12B Unified, or
-    Gemma4ForConditionalGeneration for the older 26B MoE class).
+    Gemma4UnifiedForConditionalGeneration for 12B / 31B Unified dense).
     The caller passes the class because the class name varies by
     Gemma 4 generation and the older class is being phased out.
 
@@ -78,7 +72,7 @@ def build_w8a8_specs():
 
     Scheme: per-channel INT8 weights (ch_axis=0, symmetric, static) +
     per-token INT8 activations (ch_axis=1, symmetric, dynamic).
-    Same scheme used by both the 31B-dense baseline and the MoE rewrite.
+    Same scheme used by the proven 31B-dense baseline.
     """
     # Imports inside: quark is container-only.
     from quark.torch.quantization.config.config import (

@@ -486,3 +486,24 @@ validation.
   3. Fix MAF round-trip: avoid json.dumps on already-serialized args; pass tool results as raw JSON strings.
   4. Upgrade vLLM when #48678/#47909 land in a ROCm wheel (0.26.0 is the newest available).
 - The 12B INT8 story for the hackathon: valid for "AMD local inference + quantization" demo. The accuracy gate comparison (12B INT8 vs 26B BF16) is CONFOUNDED by the plumbing defect — rerun after mitigation 2 or 3 before making claims.
+
+### Hackathon submission note: 12B dense is the shipped quantization path; MoE removed
+**Date:** 2026-08-02
+
+**Decision:** `_quark_quantize_moe.py` and the `--kind moe` path in `quantize_int8.sh` are REMOVED. 12B dense INT8 is the shipped quantization story. Rationale: the MoE path produced garbage in 4 attempts (Issues 11-13); the dense path produces a working, vLLM-servable checkpoint (see "12B dense end-to-end live run" entry). The MoE failure trail stays in this journal as history; the code is gone (git history carries it).
+
+**Quantize CLI is now dense-only:**
+  bash /root/quantize_int8.sh --model google/gemma-4-12b-it
+No --kind flag; recipe is always `_quark_quantize_dense.py`. Preflight, FX trace (opt-in), and post-quantize key fixup unchanged.
+
+**12B findings summary (for the hackathon writeup):**
+
+1. **Quantization works.** 23.9 GB BF16 -> 14 GB INT8 (~1.7x) via Quark 0.12.post1 W8A8, served on vLLM 0.26 with `--quantization quark`. Full pipeline reproducible from repo scripts: upgrade_vllm.sh -> deploy_droplet.sh (download BF16) -> quantize_int8.sh -> deploy with VLLM_FP8_MODEL.
+
+2. **Two post-quantize fixups are required and automated** (`_quark_fix_vllm_keys.py`, step 2.5):
+   - Key rename: Quark exports `embed_vision.multimodal_embedder.*` / `embed_vision.patch_*`; vLLM's gemma4_unified loader expects `embed_vision.embedding_projection.*` / `vision_embedder.*`.
+   - chat_template.jinja copy: Quark does not export it; vLLM 400s chat requests without it.
+
+3. **Tool-call reliability finding (honest, evidence-backed):** the 12B model is NOT weak at JSON or tool calling in general. Direct vLLM requests produce clean JSON; single-call structured output (extract_brief) is always schema-valid; the full agent flow works end-to-end on direct queries. The observed failures (escaped quotes like `"item_id": "\\\"B07PQ7KTG8\\\""` in finalize_recommendations) appear only in MULTI-ROUND agent sessions, where the model occasionally emits a plain `"` where Gemma 4's native `<|"|>` delimiter is expected, and vLLM's gemma4 parser (open PRs #48678, #47909; unfixed in any ROCm wheel as of 2026-08-02) mangles it. Root-cause chain verified: chat templates are md5-identical across 12B/31B/26B; parser and MAF identical; MAF upgrade (core 1.13.0 / openai 1.12.0) did not change the serialization line and tests pass. The 26B MoE baseline (Aug 1) did not hit this because the bigger model emits the delimiter format more faithfully. Honest framing for the writeup: quantization is sound; the residual risk is a narrow model-fidelity-vs-parser interaction under multi-round load, fixable in vLLM (parser fix) or app-side (repair pass), NOT a reason to disqualify the INT8 checkpoint.
+
+4. **Numbers for the writeup:** 12.54 GiB weights + 5.22 GiB CUDA graphs; ~157 GiB KV cache at GPU_MEM=0.9 / max-model-len 32768 on MI300X (191.7 GB); first torch.compile ~5 min, cached afterward (84s boot); KV_CACHE_DTYPE=auto avoids uncalibrated fp8 KV warnings on INT8 checkpoints.

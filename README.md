@@ -48,7 +48,7 @@ The MoE variant uses 3.8B active parameters per token and is **3.69× faster** t
 
 Droplet lifecycle + catalog utilities — see [scripts/README.md](scripts/README.md) for what each script does, where it runs (laptop vs droplet), and the ordering.
 
-**Known limitation:** W8A8 INT8 works on dense models (31B proven −0.08pp GSM8K on the older `Gemma4ForConditionalGeneration` class; 12B target on `Gemma4UnifiedForConditionalGeneration` — accuracy not yet measured) but **fails on the 26B A4B MoE** — 4 attempts, all load but produce garbage (DEPLOYMENT_JOURNAL.md Issues 11-13). The 26B ships as BF16; quantization bonus is claimable only on a proven dense path. See [scripts/README.md](scripts/README.md) for recipe split + Unified-vs-older caveat.
+**Known limitation:** W8A8 INT8 quantization ships on the **12B dense** path (works end-to-end on vLLM 0.26, served via `--quantization quark`). The 26B A4B MoE path was removed — Quark W8A8 INT8 on the MoE produced garbage in 4 attempts (DEPLOYMENT_JOURNAL.md Issues 11-13); the 26B ships as BF16. Accuracy caveat: the 31B-dense baseline (−0.08pp GSM8K) was measured on the older `Gemma4ForConditionalGeneration` class; 12B uses `Gemma4UnifiedForConditionalGeneration` — treat 12B as a fresh run and verify via the tool-call accuracy gate before claiming the quantization bonus. See [scripts/README.md](scripts/README.md).
 
 ## Documentation
 
