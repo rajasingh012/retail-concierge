@@ -354,6 +354,15 @@ log "    --enable-auto-tool-choice --tool-call-parser gemma4 (MAF tool calls, Ge
 log "    AITER pinned (VLLM_USE_AITER=1, FA + LINEAR on) — AMD-tuned attention/MoE paths"
 [ -n "$SERVED_FLAGS" ] && log "    $SERVED_FLAGS (Quark W8A8 quantization)"
 
+# Open the API port on the host firewall. The DO 1-Click image ships UFW
+# enabled with only 22/80/443 allowed; without this, /v1/models and
+# /v1/chat/completions hang at the TCP layer (TCP handshake completes but
+# the app-level reply never returns through UFW). Idempotent.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "${VLLM_PORT:-8000}/tcp" >/dev/null 2>&1 || true
+    log "    UFW: opened ${VLLM_PORT:-8000}/tcp for the vLLM API"
+fi
+
 # shellcheck disable=SC2086
 docker exec -d "$CTR_NAME" bash -c "
     export VLLM_USE_AITER=1
