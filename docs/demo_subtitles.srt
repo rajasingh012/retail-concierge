@@ -1,0 +1,31 @@
+1
+00:00:00,000 --> 00:00:17,000
+RetailConcierge is a conversational shopping agent that runs entirely on an AMD Instinct MI300X. It searches a 145,000-product offline catalog, asks only the questions that matter, and gives evidence-backed recommendations — with every word generated locally on AMD hardware, no cloud API.
+
+2
+00:00:25,000 --> 00:00:46,000
+The agent extracts the shopping brief — intent, product type, budget — searches the offline catalog, screens for exact products, and ranks deterministically. Each recommendation carries why it fits and trade-offs — no invented prices, no fake availability.
+
+3
+00:00:55,000 --> 00:01:13,000
+When the request is ambiguous, it asks one precise clarifying question instead of guessing. That's the reasoning and planning behavior.
+
+4
+00:01:15,000 --> 00:01:35,000
+Recommendations come with refinement chips. Choosing one continues the same session — the agent remembers context across turns.
+
+5
+00:01:40,000 --> 00:02:08,000
+Every token is generated on the MI300X through ROCm — no cloud inference. The server is vLLM 0.26 with AITER attention and prefix caching enabled.
+
+6
+00:02:10,000 --> 00:02:48,000
+Single-stream throughput: 150 tokens per second on the dense 31B. At concurrency 8: 651 tokens per second with prefix caching enabled. Median time-to-first-token ~35 ms — multi-turn conversations reuse cached prefixes.
+
+7
+00:02:50,000 --> 00:03:08,000
+We quantized Gemma 4 12B from BF16 to W8A8 INT8 with AMD Quark — 23.9 GB down to 14 GB, about 1.7x smaller, served with vLLM's Quark loader. Smaller weights mean faster decode and more room for KV cache on the same GPU.
+
+8
+00:03:10,000 --> 00:03:38,000
+The full pipeline is reproducible from the repository: one script upgrades vLLM on the droplet, one quantizes with Quark, one deploys and smoke-tests the server, and the application runs as a local console agent. Everything — the agent, the offline catalog, the AMD deployment scripts — is open source in the repo.
