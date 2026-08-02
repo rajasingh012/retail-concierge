@@ -1,11 +1,11 @@
-"""Quark W8A8 INT8 quantization of Gemma 4 26B A4B MoE (MoE-aware recipe).
+"""Quark W8A8 INT8 quantization - Gemma 4 26B A4B MoE (MoE-aware recipe).
 
-Recipe: nameistoken/Qwen3.6-35B-A3B-Quark-W8A8-INT8 (HF) — a *MoE* model
+Recipe: nameistoken/Qwen3.6-35B-A3B-Quark-W8A8-INT8 (HF) - a *MoE* model
 (256 experts, fused gate_up_proj) quantized with AMD Quark, measured
 +0.00pp vs BF16 on GSM8K and +30-78% decode throughput. Two structural
 steps make MoE quantization correct; the 31B-dense recipe skipped both:
 
-1. PRE-QUANTIZATION REWRITE — Gemma4TextExperts stores expert weights as
+1. PRE-QUANTIZATION REWRITE - Gemma4TextExperts stores expert weights as
    fused 3D tensors (gate_up_proj [E, 2I, H], down_proj [E, H, I]).
    Quark must see each expert as a standard nn.Linear, and vLLM's
    FusedMoE loader expects per-expert params. We replace each layer's
@@ -14,25 +14,34 @@ steps make MoE quantization correct; the 31B-dense recipe skipped both:
    See https://huggingface.co/nameistoken/Qwen3.6-35B-A3B-Quark-W8A8-INT8
    ("Pre-quantization rewrite" section).
 
-2. POST-EXPORT RENAME — Quark's custom_mode='quark' export emits
+2. POST-EXPORT RENAME - Quark's custom_mode='quark' export emits
    '*_quantizer.scale'/'*_quantizer.zero_point' keys. vLLM/HF expects
    '*_scale' (symmetric, no zero_point) with weight_scale squeezed
    [out,1] -> [out]. rename_keys() below does this.
 
 Excluded layers (kept BF16):
-  lm_head, *mlp.gate* (MoE router), *shared_expert_gate*,
-  *visual* (vision tower), *embed_tokens*.
+  lm_head, *router* (MoE router), *shared_expert_gate*,
+  *vision_tower* / *embed_vision* / *visual*, *embed_tokens*.
+
+NOTE: do NOT use "*mlp.gate*" here - Gemma4's dense MLP is fused as
+gate_up_proj in vLLM; excluding gate_proj but not up_proj splits the
+fused shards into different schemes and vLLM's quark loader raises
+ValueError.
 
 The quantization scheme itself (per-channel weight, per-token dynamic
-activation) is unchanged from the dense recipe — that part was correct.
+activation) is unchanged from the dense recipe - that part was correct.
+It is provided by _quark_common.build_qconfig.
 
-Quark 0.12 API drift vs the 0.11 recipes:
-  Config -> QConfig, QuantizationConfig -> QLayerConfig,
-  ModelQuantizer.export_model() -> quark.torch.export_safetensors().
+KNOWN LIMITATION: this recipe loads on the 26B A4B MoE but produces
+garbage (4 attempts documented in DEPLOYMENT_JOURNAL.md Issues 11-13).
+The 26B ships as BF16; only the dense path is production-claimable.
+
+Use via quantize_int8.sh:
+    bash quantize_int8.sh --kind moe --model google/gemma-4-26B-A4B-it
 """
 from __future__ import annotations
 
-import json
+import glob
 import os
 import sys
 import time
@@ -40,7 +49,19 @@ import time
 import torch
 import torch.nn as nn
 
-MODEL_OUT = os.environ.get("QUARK_OUT", "/models/gemma-4-26B-A4B-it-int8-moe2")
+# Ensure scripts/ is on sys.path so _quark_common is importable when this
+# script is copied into /tmp inside the container.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _quark_common import (  # noqa: E402
+    build_qconfig,
+    load_bf16,
+    quantize_and_export,
+    read_bf16_path,
+)
+
+
+# ─── MoE-only: structural rewrite + post-export key fixup ─────────────────────
 
 
 def split_fused_experts(model: nn.Module) -> int:
@@ -128,7 +149,6 @@ def rename_keys(model_dir: str) -> None:
     - '*_quantizer.zero_point' -> dropped (symmetric quant)
     - weight_scale squeezed from [out, 1] to [out]
     """
-    import glob
     from safetensors import safe_open
     from safetensors.torch import save_file
 
@@ -150,106 +170,47 @@ def rename_keys(model_dir: str) -> None:
         print(f"  renamed keys in {os.path.basename(st_path)} ({len(tensors)} tensors)")
 
 
-def main() -> None:
-    with open("/tmp/bf16_path.txt") as f:
-        model_in = f.read().strip()
-    if not model_in or not os.path.isdir(model_in):
-        print(f"FATAL: BF16 source dir not found: {model_in!r}", file=sys.stderr)
-        return 1
+# MoE-tuned exclude list. Differs from DENSE_EXCLUDE: no *experts*/*moe*
+# (already rewritten into per-expert Linears that ARE quantized), but
+# includes *router* and *shared_expert_gate*.
+MOE_EXCLUDE = [
+    "lm_head",
+    "*router*",            # MoE router (router.proj, router.scale)
+    "*shared_expert_gate*",  # per-layer gate (if present)
+    "*vision_tower*",      # vision tower (NOT "*visual*" - the
+    "*embed_vision*",      #   actual prefixes are vision_tower /
+    "*visual*",            #   embed_vision)
+    "*embed_tokens*",
+]
 
-    from transformers import AutoTokenizer, Gemma4ForConditionalGeneration
-    from quark.torch import ModelQuantizer
-    from quark.torch.quantization.config.config import (
-        QConfig,
-        QLayerConfig,
-        QTensorConfig,
-        Dtype,
-    )
-    from quark.torch.quantization.config.type import (
-        RoundType,
-        ScaleType,
-        QSchemeType,
-    )
-    from quark.torch.quantization.observer import PerChannelMinMaxObserver
 
-    print(f"Loading BF16 model from {model_in} (device_map=auto)")
-    t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(model_in, trust_remote_code=True)
-    model = Gemma4ForConditionalGeneration.from_pretrained(
-        model_in,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True,
-    )
-    print(f"Model loaded in {time.time() - t0:.1f}s")
+def main() -> int:
+    # 26B A4B MoE uses the older Gemma4ForConditionalGeneration class
+    # (verified from google/gemma-4-26B-A4B-it/config.json: model_type=gemma4,
+    # architectures=[Gemma4ForConditionalGeneration]). Import is inside
+    # main() so a transformers-version mismatch surfaces at run time.
+    from transformers import Gemma4ForConditionalGeneration
+
+    model_in = read_bf16_path()
+    model, tokenizer = load_bf16(model_in, Gemma4ForConditionalGeneration)
 
     # Step 1: split fused expert tensors into per-expert nn.Linear triplets.
     n = split_fused_experts(model)
     print(f"Split fused experts in {n} layers (128 experts each)")
 
-    weight_spec = QTensorConfig(
-        dtype=Dtype.int8,
-        observer_cls=PerChannelMinMaxObserver,
-        symmetric=True,
-        is_dynamic=False,
-        qscheme=QSchemeType.per_channel,
-        ch_axis=0,
-        round_method=RoundType.round,
-        scale_type=ScaleType.float,
-    )
-    input_spec = QTensorConfig(
-        dtype=Dtype.int8,
-        observer_cls=PerChannelMinMaxObserver,
-        symmetric=True,
-        is_dynamic=True,
-        qscheme=QSchemeType.per_channel,
-        ch_axis=1,
-        round_method=RoundType.round,
-        scale_type=ScaleType.float,
-    )
+    q_cfg = build_qconfig(MOE_EXCLUDE)
+    model_out = os.environ.get("QUARK_OUT", "/models/gemma-4-26B-A4B-it-int8-moe2")
 
-    q_cfg = QConfig(
-        global_quant_config=QLayerConfig(
-            input_tensors=input_spec,
-            weight=weight_spec,
-        ),
-        exclude=[
-            "lm_head",
-            "*router*",            # MoE router (router.proj, router.scale)
-            "*shared_expert_gate*",  # per-layer gate (if present)
-            "*vision_tower*",      # vision tower (NOT "*visual*" — the
-            "*embed_vision*",      #   actual prefixes are vision_tower /
-            "*visual*",            #   embed_vision)
-            "*embed_tokens*",
-            # NOTE: do NOT use "*mlp.gate*" here — Gemma4's dense MLP is
-            # fused as gate_up_proj in vLLM; excluding gate_proj but not
-            # up_proj splits the fused shards into different schemes and
-            # vLLM's quark loader raises ValueError.
-        ],
-    )
-
-    print("Quantizing (W8A8 INT8, MoE-aware, no calibration data needed)...")
-    quantizer = ModelQuantizer(q_cfg, multi_device=True)
-    model = quantizer.quantize_model(model, dataloader=None)
-    quantizer.freeze(model)
-
-    os.makedirs(MODEL_OUT, exist_ok=True)
-    print(f"Exporting to {MODEL_OUT} (pack_method=order, real_quantized, quark mode)...")
-    from quark.torch import export_safetensors
-    export_safetensors(
-        model,
-        MODEL_OUT,
-        pack_method="order",
-        weight_format="real_quantized",
-        custom_mode="quark",
-    )
+    t0 = time.time()
+    rc = quantize_and_export(model, tokenizer, q_cfg, model_out)
 
     # Step 2: rename Quark keys to vLLM/HF layout.
-    print("Post-export key rename (quantizer.scale -> _scale, drop zero_point)...")
-    rename_keys(MODEL_OUT)
-    tokenizer.save_pretrained(MODEL_OUT)
-    print(f"Done in {time.time() - t0:.1f}s -> {MODEL_OUT}")
-    return 0
+    if rc == 0:
+        print("Post-export key rename (quantizer.scale -> _scale, drop zero_point)...")
+        rename_keys(model_out)
+        tokenizer.save_pretrained(model_out)
+        print(f"Done in {time.time() - t0:.1f}s -> {model_out}")
+    return rc
 
 
 if __name__ == "__main__":

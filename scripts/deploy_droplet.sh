@@ -28,7 +28,7 @@
 #   6. Re-launches vLLM with rubric-winning flags:
 #        --enable-prefix-caching (multi-turn bonus)
 #        --enable-chunked-prefill (latency under concurrency)
-#        --kv-cache-dtype fp8 (VRAM headroom on MI300X)
+#        --kv-cache-dtype fp8 (BF16 serving; auto for Quark INT8 — see KV_CACHE_DTYPE)
 #        --enable-auto-tool-choice --tool-call-parser gemma4 (Gemma 4 native tool calls)
 #   7. Waits for "server is fired up" or fails fast
 #   8. Smoke-tests: /health, /v1/models, and a real tool-call request
@@ -73,6 +73,12 @@ SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 SMOKE_TEST_QUERIES="${SMOKE_TEST_QUERIES:-1}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-600}"   # 10 min for model load
+# KV cache dtype. Defaults: fp8 for BF16 serving (proven, benchmarked on
+# 26B MoE: 427 tok/s, VRAM headroom), auto for Quark INT8 serving (small
+# model, and fp8 KV triggers "uncalibrated q_scale ... may cause accuracy
+# issues" since Quark INT8 checkpoints carry no KV scale factors).
+# Override explicitly with KV_CACHE_DTYPE=bfloat16|fp8|auto when needed.
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
 
 # Optional: serve an AMD Quark-quantized FP8 W8A8 checkpoint.
 # Default is to serve the BF16 source model. Build the FP8 model once with
@@ -256,17 +262,22 @@ if [ -n "$VLLM_FP8_MODEL" ] && docker exec "$CTR_NAME" test -d "$VLLM_FP8_MODEL"
     SERVED_MODEL="$VLLM_FP8_MODEL"
     VLLM_VERSION=$(docker exec "$CTR_NAME" python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "0.0.0")
     if printf '%s\n' "$VLLM_VERSION" | awk -F. '{ exit !($1 > 0 || $2 >= 26) }'; then
-        SERVED_FLAGS="--quantization quark --kv-cache-dtype fp8"
+        SERVED_FLAGS="--quantization quark"
         log "    Serving Quark-quantized FP8 weights from $VLLM_FP8_MODEL (vLLM $VLLM_VERSION supports --quantization quark)"
     else
-        SERVED_FLAGS="--quantization fp8 --kv-cache-dtype fp8"
+        SERVED_FLAGS="--quantization fp8"
         log "    WARNING: vLLM $VLLM_VERSION < 0.26 — falling back to --quantization fp8 (no Quark recipe);"
         log "             see scripts/quantize_int8.sh TODO on upgrading to vLLM nightly for the Quark path"
     fi
+    # Quark INT8 checkpoints carry no KV scale factors; fp8 KV cache would run
+    # uncalibrated (vLLM warns "may cause accuracy issues"). Default to auto.
+    KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
     log "    Serving Quark-quantized FP8 weights from $VLLM_FP8_MODEL"
 else
     SERVED_MODEL="$VLLM_MODEL"
     SERVED_FLAGS=""
+    # BF16 serving: keep fp8 KV cache (proven on 26B MoE: 427 tok/s bench).
+    KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
     if [ -n "$VLLM_FP8_MODEL" ]; then
         log "    VLLM_FP8_MODEL set but $VLLM_FP8_MODEL not in container — falling back to BF16 source"
     fi
@@ -283,7 +294,7 @@ fi
 # (multi-latent-attention) model.
 log "    --enable-prefix-caching (multi-turn smoothness bonus)"
 log "    --enable-chunked-prefill (latency under concurrency)"
-log "    --kv-cache-dtype fp8 (VRAM headroom on MI300X)"
+log "    --kv-cache-dtype $KV_CACHE_DTYPE (auto for Quark INT8, fp8 for BF16)"
 log "    --enable-auto-tool-choice --tool-call-parser gemma4 (MAF tool calls, Gemma 4 native)"
 log "    AITER pinned (VLLM_USE_AITER=1, FA + LINEAR on) — AMD-tuned attention/MoE paths"
 [ -n "$SERVED_FLAGS" ] && log "    $SERVED_FLAGS (Quark FP8 W8A8 quantization)"
@@ -302,7 +313,7 @@ docker exec -d "$CTR_NAME" bash -c "
         --tensor-parallel-size 1 \
         --enable-prefix-caching \
         --enable-chunked-prefill \
-        --kv-cache-dtype fp8 \
+        --kv-cache-dtype $KV_CACHE_DTYPE \
         --enable-auto-tool-choice \
         --tool-call-parser gemma4 \
         $SERVED_FLAGS \
@@ -324,7 +335,7 @@ while [ "$ELAPSED" -lt "$STARTUP_TIMEOUT" ]; do
         STARTED=1
         break
     fi
-    if docker exec "$CTR_NAME" grep -qiE "OutOfMemoryError|CUDA out of memory|HIP out of memory|RuntimeError: out of memory|memory allocation failed|Free memory on device" "$LOG_FILE" 2>/dev/null; then
+    if docker exec "$CTR_NAME" grep -qiE "OutOfMemoryError|CUDA out of memory|HIP out of memory|RuntimeError: out of memory|memory allocation failed|failed to allocate memory" "$LOG_FILE" 2>/dev/null; then
         log "    OOM detected in vLLM log. Tail:"
         docker exec "$CTR_NAME" tail -80 "$LOG_FILE" 2>/dev/null | sed 's/^/      /' | tee -a "$REPORT_FILE"
         die "vLLM ran out of GPU memory — try VLLM_MODEL with smaller weights, lower GPU_MEM, or shorter MAX_LEN" 4
@@ -395,10 +406,13 @@ fi
 log "    [smoke 2/3] /v1/models"
 MODELS_JSON=$(docker exec "$CTR_NAME" curl -fsS --max-time 10 "http://localhost:$VLLM_PORT/v1/models" 2>&1 || true)
 log "      $(echo "$MODELS_JSON" | head -c 200)"
-if ! echo "$MODELS_JSON" | grep -q "$VLLM_MODEL"; then
-    log "    Expected: $VLLM_MODEL"
+# The served model name is $SERVED_MODEL (which equals $VLLM_MODEL for BF16
+# serving, or the Quark checkpoint path when VLLM_FP8_MODEL is set). Check
+# against it, not $VLLM_MODEL, so the FP8/INT8 path passes.
+if ! echo "$MODELS_JSON" | grep -q "$SERVED_MODEL"; then
+    log "    Expected: $SERVED_MODEL"
     log "    Got:      $MODELS_JSON"
-    die "/v1/models does not list $VLLM_MODEL — check --served-model-name or model arg" 6
+    die "/v1/models does not list $SERVED_MODEL — check --served-model-name or model arg" 6
 fi
 
 # 3. Tool-call probe — this is the make-or-break test for MAF
@@ -406,7 +420,7 @@ log "    [smoke 3/3] tool-call probe (the critical test for MAF)"
 TOOL_CALL_RESP=$(docker exec "$CTR_NAME" curl -fsS --max-time 30 "http://localhost:$VLLM_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d "{
-        \"model\": \"$VLLM_MODEL\",
+        \"model\": \"$SERVED_MODEL\",
         \"messages\": [
             {\"role\":\"user\",\"content\":\"List two coffee makers from the catalog.\"}
         ],
@@ -447,7 +461,7 @@ log "    ✓ All smoke tests passed."
 
 log ""
 log "=== DEPLOYMENT COMPLETE ==="
-log "  Model:       $VLLM_MODEL"
+log "  Model:       $SERVED_MODEL"
 log "  Endpoint:    http://localhost:$VLLM_PORT/v1"
 log "  vLLM log:    $LOG_FILE  (inside container $CTR_NAME)"
 log "  Fingerprint: $FP_FILE"
@@ -459,5 +473,5 @@ log ""
 log "Then run the agent bench:"
 log "  RETAIL_PROVIDER=vllm \\"
 log "  RETAIL_BASE_URL=http://<droplet-ip>:$VLLM_PORT/v1 \\"
-log "  RETAIL_MODEL=$VLLM_MODEL \\"
+log "  RETAIL_MODEL=$SERVED_MODEL \\"
 log "    uv run python bench/run_5_queries.py"

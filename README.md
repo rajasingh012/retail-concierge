@@ -44,33 +44,11 @@ RETAIL_MODEL=google/gemma-4-31B-it uv run python main.py
 
 The MoE variant uses 3.8B active parameters per token and is **3.69× faster** than the dense 31B at concurrency-8 with the same tool-calling flags (`--tool-call-parser gemma4`, `--kv-cache-dtype fp8`, `--enable-prefix-caching`).
 
-## GPU droplet workflow (scripts/)
+## Scripts
 
-Three orchestrator scripts manage the AMD MI300X droplet lifecycle. Run them ON the droplet (via `ssh root@<ip> 'bash -s' < script.sh` or scp + bash). The app + catalog DB stay on this machine.
+Droplet lifecycle + catalog utilities — see [scripts/README.md](scripts/README.md) for what each script does, where it runs (laptop vs droplet), and the ordering.
 
-```bash
-# 1. Upgrade vLLM from the 1-Click image's 0.23 to 0.26 (one-time per droplet).
-#    Required for serving Quark-quantized checkpoints (vLLM 0.23 MoE loader bug).
-ssh root@$DROPLET 'bash -s' < scripts/upgrade_vllm.sh
-
-# 2. Deploy: pull BF16 model into the container + start vLLM serving on :8000.
-ssh root@$DROPLET 'bash -s' < scripts/deploy_droplet.sh
-#    Set VLLM_FP8_MODEL=/models/<quark-output> to serve a quantized checkpoint instead.
-
-# 3. Quantize the BF16 model with AMD Quark (W8A8 INT8).
-#    Uses scripts/_quark_quantize_int8.py (dense recipe — for dense models
-#    like Gemma 4 12B/31B). Output: /models/gemma-4-26B-A4B-it-int8/
-ssh root@$DROPLET 'bash -s' < scripts/quantize_int8.sh
-
-# 4. Benchmark: concurrency scaling 1→2→4→8 (run from THIS machine).
-BASE_URL=http://$DROPLET:8000/v1 MODEL=google/gemma-4-26B-A4B-it \
-  bash scripts/benchmark_concurrency.sh
-```
-
-- `upgrade_vllm.sh` — vLLM 0.23 → 0.26 via the AMD-sanctioned upstream wheel index (`wheels.vllm.ai/rocm/0.26.0/rocm723`). Fixes ABI breaks (flash-attn, torchaudio, torch_c_dlpack_ext) and verifies imports. See DEPLOYMENT_JOURNAL.md Issue 12.
-- `deploy_droplet.sh` — preflight (GPU + container), model download (HF, `max_workers=4`), launch with AITER pinned + FP8 KV cache + chunked prefill + prefix caching + `--tool-call-parser gemma4`, startup polling, smoke tests.
-- `quantize_int8.sh` — AMD Quark W8A8 INT8 quantization (orchestrator; the actual quantizer is `_quark_quantize_int8.py` for dense models, `_quark_quantize_moe.py` for MoE). Handles preflight, runs the quantizer in-container, verifies output, prints next steps.
-- **Known limitation:** W8A8 INT8 works on dense models (31B proven −0.08pp GSM8K; 12B test planned) but **fails on the 26B A4B MoE** — 4 attempts, all load but produce garbage (DEPLOYMENT_JOURNAL.md Issues 11-13). The 26B ships as BF16; quantization bonus is claimable only via a dense model (e.g. 12B).
+**Known limitation:** W8A8 INT8 works on dense models (31B proven −0.08pp GSM8K on the older `Gemma4ForConditionalGeneration` class; 12B target on `Gemma4UnifiedForConditionalGeneration` — accuracy not yet measured) but **fails on the 26B A4B MoE** — 4 attempts, all load but produce garbage (DEPLOYMENT_JOURNAL.md Issues 11-13). The 26B ships as BF16; quantization bonus is claimable only on a proven dense path. See [scripts/README.md](scripts/README.md) for recipe split + Unified-vs-older caveat.
 
 ## Documentation
 
