@@ -217,14 +217,27 @@ ffmpeg -i screen-recording.mkv -i demo_narration.mp3 \
 
 ## PHASE 2 PLAN (next session, laptop only — no SSH needed)
 
-Record the agent behavior locally (app hits the droplet's public vLLM API):
+Record the agent behavior locally (app hits the droplet's public vLLM API).
 
-1. `uv run python main.py` with RETAIL_PROVIDER=vllm, RETAIL_BASE_URL=http://129.212.185.54:8000/v1,
-   RETAIL_MODEL=/models/gemma-4-12b-it-int8
+The droplet's public IP changes every destroy/recreate, so this plan does
+NOT hardcode it. Instead, deploy_droplet.sh writes the live IP to
+`/root/droplet_ip.txt` on the droplet. Pull it to the laptop once per
+session and let the env take care of the rest:
+
+```bash
+# Replace <droplet-ip> with the live IP shown in the DO dashboard.
+scp root@<droplet-ip>:/root/droplet_ip.txt .
+export RETAIL_BASE_URL="http://$(cat droplet_ip.txt):8000/v1"
+export RETAIL_MODEL=rajasingh012/gemma-4-12b-it-quark-w8a8-int8
+```
+
+Then record:
+
+1. `uv run python main.py` (env above is already set)
 2. Query 1 (cue 2, 0:22-0:41): "a pair of wireless earbuds under 5k rupees" → 5 recs
 3. Query 2 (cue 3, 0:42-0:52): "I want something for my trip." → clarification
 4. Query 3 (cue 4, 0:52-1:01): "stainless steel water bottle 1L" → recs + chip
-5. Speed bench (cue 6, 1:15-1:31): `bash scripts/benchmark_concurrency.sh`
+5. Speed bench (cue 6, 1:15-1:31): `BASE_URL=${RETAIL_BASE_URL} MODEL=google/gemma-4-12b-it bash scripts/benchmark_concurrency.sh`
 6. Repo close (cue 8, 1:59-2:32): browser/github.com/rajasingh012/retail-concierge
 
 Final assembly: lay Phase 1 video at cue positions 1/5/7, Phase 2 video at 2/3/4/6/8,

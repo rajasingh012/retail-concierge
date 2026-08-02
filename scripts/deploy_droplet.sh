@@ -539,3 +539,39 @@ log "  RETAIL_PROVIDER=vllm \\"
 log "  RETAIL_BASE_URL=http://<droplet-ip>:$VLLM_PORT/v1 \\"
 log "  RETAIL_MODEL=$SERVED_MODEL \\"
 log "    uv run python bench/run_5_queries.py"
+
+# ─── [6/5] write the public IP for downstream scripts ──────────────────────
+# The droplet is throwaway — its public IP changes every destroy/recreate.
+# Hardcoding the IP into the repo would go stale immediately. Instead, write
+# it to /root/droplet_ip.txt on every successful deploy so the demo script
+# and Phase 2 recording can `scp` it back and read the live value, never
+# hardcoding an IP in source.
+#
+# DO metadata service is the authoritative source for the public IPv4 on
+# DigitalOcean droplets. Falls back to `hostname -I` if the metadata
+# service is unreachable (non-DO host) with a loud warning.
+log ""
+log "[6/5] Writing public IP to /root/droplet_ip.txt"
+PUBLIC_IP=""
+if PUBLIC_IP=$(curl -fsS --max-time 5 \
+        http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address \
+        2>/dev/null) && [ -n "$PUBLIC_IP" ]; then
+    log "    from DO metadata: $PUBLIC_IP"
+else
+    PUBLIC_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    log "    WARN: DO metadata unreachable; fell back to hostname -I: $PUBLIC_IP"
+    log "    WARN: this may be a private IP if the droplet has no public iface — verify before recording"
+fi
+printf '%s\n' "$PUBLIC_IP" > /root/droplet_ip.txt
+chmod 0644 /root/droplet_ip.txt
+log "    saved."
+
+cat <<EOF
+
+From your laptop, retrieve the live IP for the demo recording:
+
+    scp root@<droplet-ip>:/root/droplet_ip.txt .
+    export RETAIL_BASE_URL="http://\$(cat droplet_ip.txt):$VLLM_PORT/v1"
+    export RETAIL_MODEL=$SERVED_MODEL
+
+EOF
