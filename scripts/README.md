@@ -23,7 +23,6 @@ For the executable how-to (commands, ordering), see the per-script header commen
 ## Catalog scripts (laptop)
 
 - `import_catalog.py` — ingest `abo-listings.tar.gz` shards into the SQLite catalog via `infrastructure.database.create_schema`.
-- `probe_daily.py` — daily freshness probe; flips `url_active` 1→0 on hard dead signals, aborts on CAPTCHA / bot-wall. Cron-friendly exit codes (0/1/2).
 - `audit_verify.py` — stdlib-only verifier for the tamper-evident audit JSONL chain (truncation, reorder, tampering). Works without the project venv.
 
 ## Helpers
