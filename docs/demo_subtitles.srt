@@ -23,9 +23,9 @@ Every token is generated on the MI300X through ROCm — no cloud inference. The 
 Single-stream throughput: 150 tokens per second on the dense 31B. At concurrency 8: 651 tokens per second with prefix caching enabled. Median time-to-first-token ~35 ms — multi-turn conversations reuse cached prefixes.
 
 7
-00:02:50,000 --> 00:03:08,000
-We quantized Gemma 4 12B from BF16 to W8A8 INT8 with AMD Quark — 23.9 GB down to 14 GB, about 1.7x smaller, served with vLLM's Quark loader. Smaller weights mean faster decode and more room for KV cache on the same GPU.
+00:02:50,000 --> 00:03:15,000
+We swapped vLLM 0.23 for the AMD ROCm 0.26 wheel, then quantized Gemma 4 12B from BF16 to W8A8 INT8 with AMD Quark — 23.9 GB down to 14 GB, about 1.7 times smaller, served with vLLM's Quark loader. Smaller weights mean faster decode and more room for KV cache on the same GPU.
 
 8
-00:03:10,000 --> 00:03:38,000
+00:03:17,000 --> 00:03:45,000
 The full pipeline is reproducible from the repository: one script upgrades vLLM on the droplet, one quantizes with Quark, one deploys and smoke-tests the server, and the application runs as a local console agent. Everything — the agent, the offline catalog, the AMD deployment scripts — is open source in the repo.
