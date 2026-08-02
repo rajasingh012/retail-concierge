@@ -35,7 +35,13 @@
 #   9. Records GPU snapshot (amd-smi / rocm-smi) to /root/retailconcierge_gpu.txt
 #
 # Overridable env vars (with defaults):
-#   VLLM_MODEL          = google/gemma-4-26B-A4B-it
+#   VLLM_MODEL          = google/gemma-4-26B-A4B-it   (BF16 fallback / training)
+#   VLLM_HF_MODEL       = rajasingh012/gemma-4-12b-it-quark-w8a8-int8
+#                         (our public Quark W8A8 INT8 12B on HF — served with
+#                          --quantization quark; destroy/recreate-able droplet:
+#                          this script pulls the checkpoint from HF, no
+#                          re-quantize needed. Set VLLM_HF_MODEL= to serve the
+#                          BF16 VLLM_MODEL instead.)
 #   MAX_LEN             = 32768
 #   GPU_MEM             = 0.90
 #   CTR_NAME            = rocm (auto-detected: rocm, vllm, inference, amd-vllm)
@@ -66,6 +72,12 @@
 set -euo pipefail
 
 VLLM_MODEL="${VLLM_MODEL:-google/gemma-4-26B-A4B-it}"
+# VLLM_HF_MODEL: a Hugging Face repo of an already-quantized checkpoint
+# (e.g. our public Quark W8A8 INT8 12B). When set, the script downloads it
+# into the container and serves it with --quantization quark — no local
+# re-quantize needed, so a destroyed droplet is fully recreate-able from
+# just this script + the public HF repo.
+VLLM_HF_MODEL="${VLLM_HF_MODEL:-rajasingh012/gemma-4-12b-it-quark-w8a8-int8}"
 MAX_LEN="${MAX_LEN:-32768}"
 GPU_MEM="${GPU_MEM:-0.90}"
 CTR_NAME="${CTR_NAME:-vllm}"
@@ -80,9 +92,10 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-600}"   # 10 min for model load
 # Override explicitly with KV_CACHE_DTYPE=bfloat16|fp8|auto when needed.
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
 
-# Optional: serve an AMD Quark-quantized FP8 W8A8 checkpoint.
-# Default is to serve the BF16 source model. Build the FP8 model once with
-# scripts/quantize_int8.sh (runs Quark on the BF16 weights), then set
+# Optional: serve an AMD Quark-quantized FP8 W8A8 checkpoint from a LOCAL dir.
+# Default is to serve the BF16 source model — but the recommended default is
+# now VLLM_HF_MODEL (our public Quark INT8 on HF, set above). Build a local
+# FP8 model once with scripts/quantize_int8.sh, then set
 # VLLM_FP8_MODEL=/models/gemma-4-26B-A4B-it-fp8 to swap.
 VLLM_FP8_MODEL="${VLLM_FP8_MODEL:-}"
 
@@ -217,6 +230,40 @@ else
     log "    SKIP_DOWNLOAD=1 — using existing cache"
 fi
 
+# Download the quantized HF checkpoint (if VLLM_HF_MODEL is set and not
+# already cached as a local dir). Makes the droplet fully recreate-able:
+# destroy -> deploy_droplet.sh -> pulls the Quark INT8 from HF -> serve.
+if [ -n "$VLLM_HF_MODEL" ] && ! docker exec "$CTR_NAME" test -d "/models/$VLLM_HF_MODEL"; then
+    if [ "$SKIP_DOWNLOAD" = "1" ]; then
+        log "    VLLM_HF_MODEL=$VLLM_HF_MODEL not cached locally and SKIP_DOWNLOAD=1 — will serve it as a HF repo ID"
+    else
+        log "    Pre-downloading quantized checkpoint $VLLM_HF_MODEL (skippable via SKIP_DOWNLOAD=1)"
+        DL_LOG="$(mktemp)"
+        if ! docker exec "$CTR_NAME" bash -c "
+            export HF_ENDPOINT=\${HF_ENDPOINT:-https://hf-mirror.com}
+            python3 -c \"
+from huggingface_hub import snapshot_download
+import os, sys
+os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
+try:
+    p = snapshot_download(repo_id='$VLLM_HF_MODEL', allow_patterns=['*.json','*.txt','*.model','*.safetensors','tokenizer*','*.jinja'])
+    print('Quantized checkpoint cached at:', p)
+except Exception as e:
+    print('DOWNLOAD ERROR:', type(e).__name__, str(e)[:500], file=sys.stderr)
+    sys.exit(1)
+\"
+        " >"$DL_LOG" 2>&1; then
+            log "    Quantized download failed. Tail of download log:"
+            tail -20 "$DL_LOG" | sed 's/^/      /' | tee -a "$REPORT_FILE"
+            rm -f "$DL_LOG"
+            log "    Continuing with $VLLM_MODEL (BF16) — set VLLM_HF_MODEL= to skip, or check HF_ENDPOINT"
+        else
+            log "    $(tail -3 "$DL_LOG")"
+            rm -f "$DL_LOG"
+        fi
+    fi
+fi
+
 log "    Recording model fingerprint"
 if ! docker exec "$CTR_NAME" bash -c "
     python3 -c \"
@@ -273,6 +320,13 @@ if [ -n "$VLLM_FP8_MODEL" ] && docker exec "$CTR_NAME" test -d "$VLLM_FP8_MODEL"
     # uncalibrated (vLLM warns "may cause accuracy issues"). Default to auto.
     KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
     log "    Serving Quark-quantized FP8 weights from $VLLM_FP8_MODEL"
+elif [ -n "$VLLM_HF_MODEL" ]; then
+    # VLLM_HF_MODEL: serve the Quark INT8 checkpoint. vLLM 0.26 can resolve
+    # an HF repo ID straight from the local HF cache (no local dir needed).
+    SERVED_MODEL="$VLLM_HF_MODEL"
+    SERVED_FLAGS="--quantization quark"
+    KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
+    log "    Serving Quark W8A8 INT8 from HF repo $VLLM_HF_MODEL (vLLM resolves it from the local HF cache)"
 else
     SERVED_MODEL="$VLLM_MODEL"
     SERVED_FLAGS=""
@@ -297,7 +351,7 @@ log "    --enable-chunked-prefill (latency under concurrency)"
 log "    --kv-cache-dtype $KV_CACHE_DTYPE (auto for Quark INT8, fp8 for BF16)"
 log "    --enable-auto-tool-choice --tool-call-parser gemma4 (MAF tool calls, Gemma 4 native)"
 log "    AITER pinned (VLLM_USE_AITER=1, FA + LINEAR on) — AMD-tuned attention/MoE paths"
-[ -n "$SERVED_FLAGS" ] && log "    $SERVED_FLAGS (Quark FP8 W8A8 quantization)"
+[ -n "$SERVED_FLAGS" ] && log "    $SERVED_FLAGS (Quark W8A8 quantization)"
 
 # shellcheck disable=SC2086
 docker exec -d "$CTR_NAME" bash -c "
