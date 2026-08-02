@@ -95,17 +95,20 @@ ssh root@<ip> "VLLM_FP8_MODEL=/models/gemma-4-12b-it-int8 bash deploy_droplet.sh
 
 ## Timing budget (hard cap 5:00)
 
-| Act | Content | Time |
-|---|---|---|
-| 1 | Hook + boot + GPU visible | 0:25 |
-| 2 | Agent works (3 queries + tools + chips) | 1:15 |
-| 3a | amd-smi live inference | 0:30 |
-| 3b | Speed table (tok/s, TTFT, concurrency) | 0:40 |
-| 3c | Quark INT8 quantization | 0:20 |
-| 4 | Repo + close | 0:30 |
-| **Total** | | **3:40** (leaves 1:20 slack) |
+The narration audio (`demo_narration.mp3`) is **2:32** — this anchors the video. The SRT timestamps are measured from the actual audio (run `python3 docs/retime_srt.py` after any narration edit to re-anchor). Plan the on-screen actions to match the audio cue positions:
 
-If you run long, cut: refinement-chips query (Act 2) → then 3c quantization → keep Acts 3a/3b (that's the 40-point bucket).
+| Cue | Narration | Audio position |
+|---|---|---|
+| 1 | Hook — app boot + amd-smi | 0:00 – 0:21 |
+| 2 | Full recommendation flow | 0:22 – 0:41 |
+| 3 | Clarification | 0:42 – 0:52 |
+| 4 | Refinement chips | 0:52 – 1:01 |
+| 5 | Live GPU inference | 1:02 – 1:14 |
+| 6 | Speed numbers | 1:15 – 1:31 |
+| 7 | Quantization (Quark) | 1:31 – 1:59 |
+| 8 | Repo + HF mention + close | 1:59 – 2:32 |
+
+If you run long, cut: refinement-chips query (cue 4) → then 3c quantization (cue 7) → keep cues 5-6 (that's the 40-point bucket).
 
 ---
 
