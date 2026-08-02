@@ -2,8 +2,8 @@
 """Build demo_narration.mp3 from demo_subtitles.srt.
 
 The SRT is the source of truth for spoken narration. This script parses
-the SRT, concatenates the cue text (one blank line between cues, giving
-the TTS a natural pause), and prints the result to stdout.
+the SRT with the `srt` library, concatenates the cue text (one blank line
+between cues, giving the TTS a natural pause), and prints the result.
 
 Usage:
     python3 docs/build_demo_audio.py                # print concatenated text
@@ -13,42 +13,32 @@ Usage:
 The script does NOT call TTS itself — text-to-speech is provided by the
 agent tool (text_to_speech) in the session the script runs in. The agent
 reads this script's output, feeds it to text_to_speech, and writes the
-MP3 back to docs/demo_narration.mp3. Run this script in any Python 3
-environment; no third-party deps required.
+MP3 back to docs/demo_narration.mp3.
+
+Dependency: `srt` (pip install srt) — the standard SRT parsing library.
 """
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
+
+import srt
 
 HERE = Path(__file__).parent
 SRT_PATH = HERE / "demo_subtitles.srt"
 
-# SRT cue format: cue number, timestamp range, one-or-more text lines, blank line.
-# This regex matches the timestamp line; everything between the timestamp and the
-# next blank line (or EOF) is the cue text.
-CUE_RE = re.compile(
-    r"^\d+\s*$\n"          # cue number
-    r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*$\n"
-    r"((?:.*\n)+?)"        # one or more text lines (non-greedy)
-    r"(?:\n|\Z)",          # terminated by blank line or EOF
-    re.MULTILINE,
-)
-
 
 def parse_srt(text: str) -> list[dict]:
-    matches = []
-    for m in CUE_RE.finditer(text):
-        start, end, body = m.group(1), m.group(2), m.group(3)
-        text_only = " ".join(line.strip() for line in body.strip().splitlines())
-        matches.append({
-            "cue": len(matches) + 1,
-            "start": start,
-            "end": end,
-            "text": text_only,
-        })
-    return matches
+    subs = list(srt.parse(text))
+    return [
+        {
+            "cue": sub.index,
+            "start": sub.start,
+            "end": sub.end,
+            "text": " ".join(sub.content.split()),
+        }
+        for sub in subs
+    ]
 
 
 def main() -> None:
@@ -62,7 +52,10 @@ def main() -> None:
     args = parser.parse_args()
 
     srt_text = args.srt.read_text(encoding="utf-8")
-    cues = parse_srt(srt_text)
+    try:
+        cues = parse_srt(srt_text)
+    except srt.SRTParseError as exc:
+        parser.error(f"Failed to parse {args.srt}: {exc}")
     if not cues:
         parser.error(f"No cues parsed from {args.srt}. Check the file format.")
 

@@ -15,6 +15,7 @@ dependencies = [
     "agent-framework-openai>=1.10.0",
     "json-repair>=0.61.7",
     "streamlit>=1.60.0",
+    "srt>=3.5.3",
 ]
 
 [project.urls]
