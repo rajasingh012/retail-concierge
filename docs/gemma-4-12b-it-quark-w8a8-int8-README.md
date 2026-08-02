@@ -4,7 +4,7 @@ library_name: transformers
 language:
   - en
 pipeline_tag: image-text-to-text
-base_model: google/gemma-4-12b-it
+base_model: google/gemma-4-12B-it
 tags:
   - gemma
   - gemma4
