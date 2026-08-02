@@ -30,7 +30,12 @@ def get_agent():
     db_path = Path(os.getenv("RETAIL_DB", "./retail_catalog.db"))
 
     repo = ABOCatalogRepository(db_path)
-    client = build_chat_client(provider, model)
+    client_overrides: dict[str, str] = {}
+    if base_url := os.getenv("RETAIL_BASE_URL"):
+        client_overrides["base_url"] = base_url
+    if api_key := os.getenv("RETAIL_API_KEY"):
+        client_overrides["api_key"] = api_key
+    client = build_chat_client(provider, model, **client_overrides)
     tracker = CatalogEvidenceTracker()
     audit_logger = None
     audit_path = os.getenv("RETAIL_AUDIT_LOG")
