@@ -30,5 +30,6 @@ packages = ["domain", "use_cases", "infrastructure"]
 
 [dependency-groups]
 dev = [
+    "playwright>=1.62.0",
     "pytest>=9.1.1",
 ]
