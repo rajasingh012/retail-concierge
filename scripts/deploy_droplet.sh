@@ -202,7 +202,12 @@ docker exec "$CTR_NAME" bash -c '
     pgrep -af vllm && echo "  WARN: vllm processes still present" || echo "  vllm stopped (or none was running)"
 ' || log "    WARN: pkill command returned non-zero (probably no vllm was running)"
 
-if [ "$SKIP_DOWNLOAD" != "1" ]; then
+# Download the BF16 source model ONLY if we're actually going to serve it.
+# When VLLM_HF_MODEL is set (the common case now), the quantized HF
+# checkpoint is what we serve — skip the 26B BF16 download entirely.
+if [ -n "$VLLM_HF_MODEL" ] && [ -z "$VLLM_FP8_MODEL" ]; then
+    log "    VLLM_HF_MODEL=$VLLM_HF_MODEL set — skipping BF16 $VLLM_MODEL download"
+elif [ "$SKIP_DOWNLOAD" != "1" ]; then
     log "    Pre-downloading $VLLM_MODEL (skippable via SKIP_DOWNLOAD=1)"
     DL_LOG="$(mktemp)"
     if ! docker exec "$CTR_NAME" bash -c "
@@ -231,17 +236,14 @@ else
 fi
 
 # Download the quantized HF checkpoint (if VLLM_HF_MODEL is set and not
-# already cached as a local dir). Makes the droplet fully recreate-able:
-# destroy -> deploy_droplet.sh -> pulls the Quark INT8 from HF -> serve.
-if [ -n "$VLLM_HF_MODEL" ] && ! docker exec "$CTR_NAME" test -d "/models/$VLLM_HF_MODEL"; then
-    if [ "$SKIP_DOWNLOAD" = "1" ]; then
-        log "    VLLM_HF_MODEL=$VLLM_HF_MODEL not cached locally and SKIP_DOWNLOAD=1 — will serve it as a HF repo ID"
-    else
-        log "    Pre-downloading quantized checkpoint $VLLM_HF_MODEL (skippable via SKIP_DOWNLOAD=1)"
-        DL_LOG="$(mktemp)"
-        if ! docker exec "$CTR_NAME" bash -c "
-            export HF_ENDPOINT=\${HF_ENDPOINT:-https://hf-mirror.com}
-            python3 -c \"
+# already cached). Runs even with SKIP_DOWNLOAD=1 — that flag only gates
+# the BF16 $VLLM_MODEL download above.
+if [ -n "$VLLM_HF_MODEL" ]; then
+    log "    Pre-downloading quantized checkpoint $VLLM_HF_MODEL (skippable via VLLM_HF_MODEL=)"
+    DL_LOG="$(mktemp)"
+    if ! docker exec "$CTR_NAME" bash -c "
+        export HF_ENDPOINT=\${HF_ENDPOINT:-https://hf-mirror.com}
+        python3 -c \"
 from huggingface_hub import snapshot_download
 import os, sys
 os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
@@ -252,15 +254,14 @@ except Exception as e:
     print('DOWNLOAD ERROR:', type(e).__name__, str(e)[:500], file=sys.stderr)
     sys.exit(1)
 \"
-        " >"$DL_LOG" 2>&1; then
-            log "    Quantized download failed. Tail of download log:"
-            tail -20 "$DL_LOG" | sed 's/^/      /' | tee -a "$REPORT_FILE"
-            rm -f "$DL_LOG"
-            log "    Continuing with $VLLM_MODEL (BF16) — set VLLM_HF_MODEL= to skip, or check HF_ENDPOINT"
-        else
-            log "    $(tail -3 "$DL_LOG")"
-            rm -f "$DL_LOG"
-        fi
+    " >"$DL_LOG" 2>&1; then
+        log "    Quantized download failed. Tail of download log:"
+        tail -20 "$DL_LOG" | sed 's/^/      /' | tee -a "$REPORT_FILE"
+        rm -f "$DL_LOG"
+        log "    Continuing with $VLLM_MODEL (BF16) — set VLLM_HF_MODEL= to skip, or check HF_ENDPOINT"
+    else
+        log "    $(tail -3 "$DL_LOG")"
+        rm -f "$DL_LOG"
     fi
 fi
 
