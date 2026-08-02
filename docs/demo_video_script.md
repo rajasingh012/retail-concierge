@@ -69,9 +69,9 @@ Run one query; while it generates, point at `amd-smi`:
 
 **3b. The speed numbers (2:10 – 2:50):**
 Run `benchmark_concurrency.sh` (concurrency 1→2→4→8) or show a pre-generated table. Narration:
-- "Single-stream throughput: 150 tok/s on the dense 31B, 427 tok/s on the 26B MoE."
-- "At concurrency 8: 1,575 tok/s — 3.7x faster than the dense variant, thanks to MoE's 3.8B active parameters per token."
-- "Median time-to-first-token ~35 ms with prefix caching — multi-turn conversations reuse cached prefixes."
+- "Single-stream throughput: 150 tokens per second on the dense 31B."
+- "At concurrency 8: 651 tokens per second with prefix caching enabled."
+- "Median time-to-first-token ~35 ms — multi-turn conversations reuse cached prefixes."
 
 **3c. The quantization optimization (2:50 – 3:10):**
 Show the INT8 checkpoint + one command:
@@ -80,7 +80,7 @@ ssh root@<ip> "VLLM_FP8_MODEL=/models/gemma-4-12b-it-int8 bash deploy_droplet.sh
 ```
 Narration: "We quantized Gemma 4 12B from BF16 to W8A8 INT8 with AMD Quark — 23.9 GB down to 14 GB, about 1.7x smaller, served with vLLM's Quark loader. Smaller weights mean faster decode and more room for KV cache on the same GPU."
 
-**Act 3 purpose:** prove the 40 pts — local inference on AMD, ROCm, and measurable speed optimization (quantization + MoE + prefix caching + concurrency).
+**Act 3 purpose:** prove the 40 pts — local inference on AMD, ROCm, and measurable speed optimization (quantization, prefix caching, chunked prefill, concurrency).
 
 ---
 
@@ -130,5 +130,5 @@ If you run long, cut: refinement-chips query (Act 2) → then 3c quantization �
 - No cloud inference claims — everything must visibly run on the droplet (AMD MI300X).
 - No waiting screens (model load, compile, download) — pre-warm.
 - No failed queries or the escaped-quote corruption.
-- No claim that 12B INT8 matches 26B accuracy — say "1.7x smaller weights, ~1.7x less VRAM" (true) not "lossless on our agent benchmark" (unverified).
+- No claim that 12B INT8 is "lossless" — say "1.7x smaller weights, ~1.7x less VRAM" (true) and verify accuracy via the tool-call benchmark before claiming equivalence.
 - Don't exceed 5:00 — hard cap, the rules say recommended 3–5 min.
