@@ -56,6 +56,9 @@ Droplet lifecycle + catalog utilities — see [scripts/README.md](scripts/README
 - [deploy.md](deploy.md) — catalog, inference, and benchmark commands
 - [progress.md](progress.md) — forward-looking work
 - [DEPLOYMENT_JOURNAL.md](DEPLOYMENT_JOURNAL.md) — real issues hit on AMD + fixes
+- [docs/hackathon_spec_document.md](docs/hackathon_spec_document.md) — Track 2 submission spec (AMD AI DevMaster 2026)
+- [docs/hackathon_poster_checklist.md](docs/hackathon_poster_checklist.md) — poster slides + submission checklist
+- [docs/demo_video_script.md](docs/demo_video_script.md) — demo video shot list
 
 ## Hackathon: AMD AI DevMaster 2026
 

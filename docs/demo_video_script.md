@@ -1,0 +1,134 @@
+# Demo Video Script — RetailConcierge (AMD AI DevMaster 2026, Track 2: Agentic AI)
+
+**Target:** 3:30 – 4:30 (hard max 5:00). English only (submission rule).
+**Judging map:** functional completeness & value (60 pts) + AMD Radeon/ROCm local inference & speed optimization (40 pts).
+
+Every second must serve one of the two judging buckets. The video is 60% "the agent works" and 40% "it runs on AMD, and here is the speed we engineered."
+
+---
+
+## Filming rules (read first)
+
+1. **Pre-warm everything before recording.** First torch.compile takes ~5 min and the model download is 23 GB. Boot vLLM + the app, run one warm-up query, THEN press record. Never show a loading spinner.
+2. **Terminal font ≥ 16pt**, dark theme, no wrapping. Viewers on phones must read every command.
+3. **Every command you type is visible and typed deliberately.** No mouse-only navigation for the core demo.
+4. **Show the GPU.** `amd-smi` visible with utilization spiking during inference = the 40-point proof. This is non-negotiable.
+5. **No dead air.** If something takes >2 s on screen, have narration covering it.
+6. **Do NOT show** the multi-round escaped-quote corruption or any failed query. The tool-call reliability caveat is in the repo docs (DEPLOYMENT_JOURNAL.md) — the video shows the happy path only.
+7. Record at 1080p. Screen recorder: OBS Studio (free) or `peek` on Linux. Microphone: narration over the screen recording.
+
+---
+
+## Act 1 — Hook (0:00 – 0:25)
+
+**On screen:** split view — left: `main.py` console booting; right: `amd-smi` showing MI300X.
+
+**Narration (≤25 s):**
+"RetailConcierge is a conversational shopping agent that runs entirely on an AMD Instinct MI300X. It searches a 145,000-product offline catalog, asks only the questions that matter, and gives evidence-backed recommendations — with every word generated locally on AMD hardware, no cloud API."
+
+**Do:** one clean boot line visible — the app prints `145,615 products / 576 product types; model=...`. This is the "functional completeness" opener.
+
+---
+
+## Act 2 — The agent works (0:25 – 1:40)
+
+**On screen:** console app, live. Type each query, narrate as it happens. Show the tool calls in the agent's trace if the app prints them (or overlay a small terminal with `--verbose`-style tool trace).
+
+**Query 1 — full recommendation flow (0:25 – 0:55):**
+```
+you> a pair of wireless earbuds under 5k rupees
+```
+Narration: "The agent extracts the shopping brief — intent, product type, budget — searches the offline catalog, screens for exact products, and ranks deterministically." Let the 5 recommendations render. Point at one reason line: "Each recommendation carries *why it fits* and *trade-offs* — no invented prices, no fake availability."
+
+**Query 2 — clarification, the agentic behavior (0:55 – 1:15):**
+```
+you> I want something for my trip.
+```
+Narration: "When the request is ambiguous, it asks one precise clarifying question instead of guessing — that's the reasoning-and-planning behavior." (It asks: what kind of items, budget, etc.)
+
+**Query 3 — refinement chips, multi-turn memory (1:15 – 1:40):**
+```
+you> stainless steel water bottle 1L
+you> [2]   ← pick a refinement chip (e.g., "Vacuum Insulated")
+```
+Narration: "Recommendations come with refinement chips. Choosing one continues the same session — the agent remembers context across turns." (Optional if time is tight — skip to Act 3 if over 1:40.)
+
+**Act 2 purpose:** prove 60 pts — tool use, reasoning, memory, task execution, practical value.
+
+---
+
+## Act 3 — It's real AMD: GPU + speed (1:40 – 3:10)
+
+**On screen:** split — top: `amd-smi monitor` (live utilization + VRAM); bottom: a `curl` request to the vLLM endpoint or a second terminal running `benchmark_concurrency.sh`.
+
+**3a. Live inference on GPU (1:40 – 2:10):**
+Run one query; while it generates, point at `amd-smi`:
+- GPU utilization jumping during decode
+- VRAM usage (the INT8 model: ~12.5 GiB weights — say it out loud)
+- Narration: "Every token is generated on the MI300X through ROCm — no cloud inference. The server is vLLM 0.26 with AITER attention and prefix caching enabled."
+
+**3b. The speed numbers (2:10 – 2:50):**
+Run `benchmark_concurrency.sh` (concurrency 1→2→4→8) or show a pre-generated table. Narration:
+- "Single-stream throughput: 150 tok/s on the dense 31B, 427 tok/s on the 26B MoE."
+- "At concurrency 8: 1,575 tok/s — 3.7x faster than the dense variant, thanks to MoE's 3.8B active parameters per token."
+- "Median time-to-first-token ~35 ms with prefix caching — multi-turn conversations reuse cached prefixes."
+
+**3c. The quantization optimization (2:50 – 3:10):**
+Show the INT8 checkpoint + one command:
+```
+ssh root@<ip> "VLLM_FP8_MODEL=/models/gemma-4-12b-it-int8 bash deploy_droplet.sh"
+```
+Narration: "We quantized Gemma 4 12B from BF16 to W8A8 INT8 with AMD Quark — 23.9 GB down to 14 GB, about 1.7x smaller, served with vLLM's Quark loader. Smaller weights mean faster decode and more room for KV cache on the same GPU."
+
+**Act 3 purpose:** prove the 40 pts — local inference on AMD, ROCm, and measurable speed optimization (quantization + MoE + prefix caching + concurrency).
+
+---
+
+## Act 4 — Close (3:10 – 3:40)
+
+**On screen:** the repo — `https://github.com/rajasingh012/retail-concierge`, README visible (architecture diagram + scripts).
+
+**Narration (≤30 s):**
+"The full pipeline is reproducible from the repository: one script upgrades vLLM on the droplet, one quantizes with Quark, one deploys and smoke-tests the server, and the application runs as a local console agent. Everything — the agent, the offline catalog, the AMD deployment scripts — is open source in the repo."
+
+**Do:** end on the repo URL and the Track 2 badge line from the README. Freeze frame on the URL for the last 2 seconds.
+
+---
+
+## Timing budget (hard cap 5:00)
+
+| Act | Content | Time |
+|---|---|---|
+| 1 | Hook + boot + GPU visible | 0:25 |
+| 2 | Agent works (3 queries + tools + chips) | 1:15 |
+| 3a | amd-smi live inference | 0:30 |
+| 3b | Speed table (tok/s, TTFT, concurrency) | 0:40 |
+| 3c | Quark INT8 quantization | 0:20 |
+| 4 | Repo + close | 0:30 |
+| **Total** | | **3:40** (leaves 1:20 slack) |
+
+If you run long, cut: refinement-chips query (Act 2) → then 3c quantization → keep Acts 3a/3b (that's the 40-point bucket).
+
+---
+
+## Pre-recording checklist
+
+- [ ] vLLM up: `curl http://<ip>:8000/v1/models` returns the INT8 model
+- [ ] One warm-up query run (torch.compile cache warm)
+- [ ] `amd-smi monitor` in a dedicated terminal, dark theme
+- [ ] `benchmark_concurrency.sh` table generated (or screenshot ready)
+- [ ] Console font ≥ 16pt, no wrapping
+- [ ] OBS/peek recording at 1080p, narration mic tested
+- [ ] Query texts copy-paste ready (typing errors waste time and look bad)
+- [ ] Repo page open at README for the close shot
+- [ ] Total run-through once WITHOUT recording to time it
+
+---
+
+## What NOT to do
+
+- No cloud inference claims — everything must visibly run on the droplet (AMD MI300X).
+- No waiting screens (model load, compile, download) — pre-warm.
+- No failed queries or the escaped-quote corruption.
+- No claim that 12B INT8 matches 26B accuracy — say "1.7x smaller weights, ~1.7x less VRAM" (true) not "lossless on our agent benchmark" (unverified).
+- Don't exceed 5:00 — hard cap, the rules say recommended 3–5 min.
