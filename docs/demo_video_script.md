@@ -87,9 +87,9 @@ ssh root@<ip> "VLLM_FP8_MODEL=/models/gemma-4-12b-it-int8 bash deploy_droplet.sh
 
 **On screen:** the repo — `https://github.com/rajasingh012/retail-concierge`, README visible (architecture diagram + scripts).
 
-**Narration:** SRT cue 8.
+**Narration:** SRT cue 8 (includes: "We also published the quantized model on Hugging Face for anyone to use.").
 
-**Do:** end on the repo URL and the Track 2 badge line from the README. Freeze frame on the URL for the last 2 seconds.
+**Do:** end on the repo URL and the Track 2 badge line from the README. Freeze frame on the URL for the last 2 seconds. Optionally overlay the HF repo slug `rajasingh012/gemma-4-12b-it-quark-w8a8-int8` as a small caption next to the repo URL (text only — no upload screens, no browser navigation).
 
 ---
 

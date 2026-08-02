@@ -28,4 +28,4 @@ We swapped vLLM 0.23 for the AMD ROCm 0.26 wheel, then quantized Gemma 4 12B fro
 
 8
 00:03:17,000 --> 00:03:45,000
-The full pipeline is reproducible from the repository: one script upgrades vLLM on the droplet, one quantizes with Quark, one deploys and smoke-tests the server, and the application runs as a local console agent. Everything — the agent, the offline catalog, the AMD deployment scripts — is open source in the repo.
+The full pipeline is reproducible from the repository: one script upgrades vLLM on the droplet, one quantizes with Quark, one deploys and smoke-tests the server, and the application runs as a local console agent. We also published the quantized model on Hugging Face for anyone to use. Everything — the agent, the offline catalog, the AMD deployment scripts — is open source in the repo.
