@@ -48,11 +48,20 @@ rocm-smi --showproductname
 # 3. Model served on AMD
 docker exec rocm curl -s http://localhost:8000/v1/models | python3 -m json.tool | head -15
 # 4. Live chat completion to vLLM (proves inference works)
+#    model id is the HF repo slug returned by /v1/models — NOT a /models/...
+#    local path, which is not a served-model-name in vLLM 0.26.
 docker exec rocm curl -s -X POST http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"/models/gemma-4-12b-it-int8","messages":[{"role":"user","content":"Hello"}],"max_tokens":20}' \
+  -d '{"model":"rajasingh012/gemma-4-12b-it-quark-w8a8-int8","messages":[{"role":"user","content":"Hello"}],"max_tokens":20}' \
   | python3 -c 'import sys,json; d=json.load(sys.stdin); print("model:",d["model"]); print("reply:",d["choices"][0]["message"]["content"][:80])'
 ```
+
+**Note on the recording:** every command here must actually run on the
+droplet — no `echo` substitutions for the GPU/inference evidence. The
+cues 1/5/7 footage is the "AMD-native inference" proof; if judges see
+echo'd strings standing in for real commands, the 40-point bucket
+collapses. Earlier cue1.mp4 take contained `echo '=== ... ==='` and
+`echo '145,615 products ...'` placeholders — those are gone now.
 
 ---
 
@@ -107,8 +116,13 @@ rocm-smi --showmeminfo vram --csv
 **Commands on the laptop:**
 
 ```bash
-BASE_URL=http://129.212.185.54:8000/v1 MODEL=google/gemma-4-12b-it \
-  bash scripts/benchmark_concurrency.sh
+# vLLM built-in serving bench (the cue 6 take; recorded on the 12B INT8 endpoint)
+# Run from the droplet host against the local vLLM:
+docker exec rocm bash -lc "vllm bench serve --model rajasingh012/gemma-4-12b-it-quark-w8a8-int8 \
+  --served-model-name rajasingh012/gemma-4-12b-it-quark-w8a8-int8 \
+  --host localhost --port 8000 --dataset-name random \
+  --num-prompts 10 --sonnet-input-len 256 --sonnet-output-len 128 --max-concurrency 1"
+# On-screen result: 49.8 tok/s output, 51.0 peak, 1,280 tokens in 25.7 s
 ```
 
 ### 3c. The quantization optimization (2:50 – 3:10) [PHASE 1 — GPU droplet]
@@ -237,7 +251,8 @@ Then record:
 2. Query 1 (cue 2, 0:22-0:41): "a pair of wireless earbuds under 5k rupees" → 5 recs
 3. Query 2 (cue 3, 0:42-0:52): "I want something for my trip." → clarification
 4. Query 3 (cue 4, 0:52-1:01): "stainless steel water bottle 1L" → recs + chip
-5. Speed bench (cue 6, 1:15-1:31): `BASE_URL=${RETAIL_BASE_URL} MODEL=google/gemma-4-12b-it bash scripts/benchmark_concurrency.sh`
+5. Speed bench (cue 6, 1:15-1:31): `vllm bench serve` on the droplet
+   (`docker exec rocm bash -lc "vllm bench serve --model rajasingh012/gemma-4-12b-it-quark-w8a8-int8 --served-model-name rajasingh012/gemma-4-12b-it-quark-w8a8-int8 --host localhost --port 8000 --dataset-name random --num-prompts 10 --sonnet-input-len 256 --sonnet-output-len 128 --max-concurrency 1"` → 49.8 tok/s, 51.0 peak, 1,280 tokens in 25.7 s)
 6. Repo close (cue 8, 1:59-2:32): browser/github.com/rajasingh012/retail-concierge
 
 Final assembly: lay Phase 1 video at cue positions 1/5/7, Phase 2 video at 2/3/4/6/8,

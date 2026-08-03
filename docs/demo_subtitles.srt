@@ -20,7 +20,7 @@ Every token is generated on the MI300X through ROCm — no cloud inference. The 
 
 6
 00:01:15,095 --> 00:01:30,725
-Single-stream throughput: 150 tokens per second on the dense 31B. At concurrency 8: 651 tokens per second with prefix caching enabled. Median time-to-first-token ~35 ms — multi-turn conversations reuse cached prefixes.
+vLLM's built-in benchmark against the live endpoint shows the 12B INT8 model generating 49.8 tokens per second single-stream, peaking at 51, with 1,280 tokens produced in under 26 seconds — every one of them decoded on the MI300X through ROCm.
 
 7
 00:01:31,325 --> 00:01:58,549
