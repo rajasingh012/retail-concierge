@@ -32,7 +32,7 @@
 #     and re-run bench/run_agent_bench.py from the laptop.
 #   - Pass criteria: same finalize_recommendations pass rate as BF16; no
 #     provenance_blocked non-empty where baseline was empty.
-#   - If gate fails: revert to BF16, document the rejection per PR #7's
+#   - If gate fails: revert to BF16, document the rejection with the
 #     "Production recommendation remains FP16" pattern.
 #
 # Usage (on the droplet):
@@ -231,7 +231,7 @@ Next steps (manual):
   3. Compare against the BF16 baseline (mean 9.6s / median 6.2s, Aug 1).
      Either:
        - Pass: ship INT8, claim the quantization bonus in PR body
-       - Fail: revert to BF16, document rejection per PR #7 framing
+       - Fail: revert to BF16, document rejection with the honest-rejection framing
 
 Note: vLLM 0.23 loads Quark output via --quantization fp8? NO - Quark INT8
 output uses --quantization quark (needs vLLM >= 0.26) OR vLLM may auto-detect

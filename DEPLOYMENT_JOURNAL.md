@@ -166,7 +166,7 @@ KeyError: 'layers.0.router.proj.weight_scale'
 ```
 The safetensors key is `model.language_model.layers.0.router.proj.weight_scale` (with prefix). vLLM 0.23's Quark MoE router loader builds the lookup key **without** the `model.language_model.` prefix → KeyError. Non-MoE layers work; the MoE router path is the bug.
 
-**Verdict:** Our quantization is correct. The blocker is vLLM 0.23's Quark-MoE loader. Fix requires vLLM ≥ 0.26 (Quark MoE support matured) — the AMD 1-Click image ships 0.23. Deferred, documented per PR #7's "production recommendation remains FP16" framing.
+**Verdict:** Our quantization is correct. The blocker is vLLM 0.23's Quark-MoE loader. Fix requires vLLM ≥ 0.26 (Quark MoE support matured) — the AMD 1-Click image ships 0.23. Deferred, documented with the "production recommendation remains FP16" framing.
 
 **Status:** INT8 model saved at `/models/gemma-4-26B-A4B-it-int8` (droplet), BF16 server restored as default. Revisit post-submission with vLLM ≥ 0.26.
 
@@ -185,7 +185,7 @@ The safetensors key is `model.language_model.layers.0.router.proj.weight_scale` 
 
 The W8A8 INT8 scheme works on the 31B dense (proven −0.08pp GSM8K) but corrupts the 26B A4B MoE. The corruption is not in the router/expert scales (exclusion didn't help) — likely the dynamic per-token activation quantization interacting with the MoE layer shapes, or the scale layout vLLM 0.26's loader expects vs what Quark exports for shared-expert paths.
 
-**Verdict (final):** Quark W8A8 INT8 quantization is NOT viable for the 26B A4B MoE. The 20-pt quantization bonus is not claimable. Documented per PR #7's honest-rejection framing. Future work (post-submission): try static activation quantization with calibration data, or FP8 (`fp8_e4m3`) instead of INT8.
+**Verdict (final):** Quark W8A8 INT8 quantization is NOT viable for the 26B A4B MoE. The 20-pt quantization bonus is not claimable. Documented with the honest-rejection framing. Future work (post-submission): try static activation quantization with calibration data, or FP8 (`fp8_e4m3`) instead of INT8.
 
 **Status:** BF16 restored as serving default on the vLLM 0.26 droplet (parity verified, mean 9.5s). INT8-MoE experiment closed with documented negative result.
 
@@ -209,7 +209,7 @@ The W8A8 INT8 scheme works on the 31B dense (proven −0.08pp GSM8K) but corrupt
 
 **Future work (post-submission):** (a) try `is_dynamic=False` + calibration dataset (static activation quantization); (b) try FP8 (`ptpc_fp8`) instead of INT8; (c) inspect Gemma 4's per_layer_input_gate handling in Quark's observer attachment. The recipe scaffolding (`_quark_quantize_moe.py`) is committed for provenance.
 
-**Status:** BF16 restored as serving default on vLLM 0.26 (129.212.191.188). Quantization bonus not claimable — documented honestly per PR #7 framing.
+**Status:** BF16 restored as serving default on vLLM 0.26 (129.212.191.188). Quantization bonus not claimable — documented honestly with the honest-rejection framing.
 
 ### Recipe split + 12B dense verification (post-Issue-13)
 **Date:** 2026-08-02

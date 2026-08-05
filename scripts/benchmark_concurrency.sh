@@ -3,7 +3,7 @@
 #
 # Concurrency-scaling bench. Runs the standard 5-shopping-query bench against
 # the live vLLM endpoint at concurrency 1, 2, 4, 8 and produces the headline
-# delta table for the AMD criterion. Mirrors PR #38's format:
+# delta table for the AMD criterion. Format:
 #
 #   | concurrent | TTFT P50 | tok/s | error rate |
 #
