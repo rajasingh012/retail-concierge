@@ -24,7 +24,7 @@ vLLM's built-in benchmark against the live endpoint shows the 12B INT8 model gen
 
 7
 00:01:31,325 --> 00:01:58,549
-We swapped vLLM 0.23 for the AMD ROCm 0.26 wheel, then quantized Gemma 4 12B from BF16 to W8A8 INT8 with AMD Quark — 23.9 GB down to 14 GB, about 1.7 times smaller, served with vLLM's Quark loader. Smaller weights mean faster decode and more room for KV cache on the same GPU.
+We swapped vLLM 0.23 for the AMD ROCm 0.26 wheel, then quantized Gemma 4 12B from BF16 to W8A8 INT8 with AMD Quark — 23.9 GB down to 13 GB, about 1.8 times smaller, served with vLLM's Quark loader. Smaller weights mean faster decode and more room for KV cache on the same GPU.
 
 8
 00:01:59,149 --> 00:02:31,920

@@ -131,19 +131,23 @@ docker exec rocm bash -lc "vllm bench serve --model rajasingh012/gemma-4-12b-it-
 
 **Narration:** SRT cue 7.
 
-**Commands:**
+**Commands (as recorded 2026-08-05 — live droplet, rocm container):**
 
 ```bash
-# 1. The actual INT8 checkpoint on AMD
-ls -la /models/gemma-4-12b-it-int8/
-du -sh /models/gemma-4-12b-it-int8/
+# 0. Prove the model is served (opens the cue): /v1/models returns the INT8 model id
+docker exec rocm curl -fsS http://localhost:8000/v1/models | python3 -m json.tool
+# 1. The actual INT8 checkpoint on AMD (HF cache, 13 GB total)
+docker exec rocm ls -lh /root/.cache/huggingface/hub/models--rajasingh012--gemma-4-12b-it-quark-w8a8-int8/blobs/
+docker exec rocm du -sh /root/.cache/huggingface/hub/models--rajasingh012--gemma-4-12b-it-quark-w8a8-int8/
 # 2. The Quark quantization config (proves what scheme we used)
-python3 -c "import json; print(json.dumps(json.load(open('/models/gemma-4-12b-it-int8/config.json'))['quantization_config'], indent=2)[:600])"
-# 3. The vLLM serve command that loads it (proves the AMD-native serving path)
-docker exec rocm ps auxf | grep -E "vllm serve" | grep -v grep | head -1
-# 4. The serving line proves Quark + ROCm 0.26
-docker exec rocm bash -lc "vllm --version; python3 -c 'import quark; print(\"Quark\",quark.__version__)'"
+docker exec rocm python3 -c "import json; q=json.load(open('/root/.cache/huggingface/hub/models--rajasingh012--gemma-4-12b-it-quark-w8a8-int8/snapshots/<snap>/config.json'))['quantization_config']; print('quant_method:', q.get('quant_method')); print('exclude:', q.get('exclude'))"
+# 3. Versions — proves the ROCm 0.26 wheel + AMD Quark
+docker exec rocm bash -lc "vllm --version; python3 -c 'from importlib.metadata import version; print(\"Quark\", version(\"amd-quark\"))'"
+# 4. Served model id (closes the cue)
+docker exec rocm curl -fsS http://localhost:8000/v1/models | python3 -c "import sys,json; [print(m['id']) for m in json.load(sys.stdin)['data']]"
 ```
+
+**On-screen must-see strings:** `0.26.0+rocm723`, `Quark 0.12.post1`, `quant_method: quark`, `13G` (du line), `rajasingh012/gemma-4-12b-it-quark-w8a8-int8` (served id). The `du` line reads 13G — the SRT/narration says "23.9 GB down to 13 GB, about 1.8 times smaller" to match it.
 
 **Act 3 purpose:** prove the 40 pts — local inference on AMD, ROCm, and measurable speed optimization (quantization, prefix caching, chunked prefill, concurrency).
 
@@ -212,7 +216,7 @@ ffmpeg -i screen-recording.mkv -i demo_narration.mp3 \
 - No cloud inference claims — everything must visibly run on the droplet (AMD MI300X).
 - No waiting screens (model load, compile, download) — pre-warm.
 - No failed queries or the escaped-quote corruption.
-- No claim that 12B INT8 is "lossless" — say "1.7x smaller weights, ~1.7x less VRAM" (true) and verify accuracy via the tool-call benchmark before claiming equivalence.
+- No claim that 12B INT8 is "lossless" — say "1.8x smaller weights, ~1.8x less VRAM" (true) and verify accuracy via the tool-call benchmark before claiming equivalence.
 - Don't exceed 5:00 — hard cap, the rules say recommended 3–5 min.
 
 ---
