@@ -33,9 +33,9 @@ W8A8 INT8 quantized version of [google/gemma-4-12b-it](https://huggingface.co/go
 | Parameters     | 12 B text decoder (quantized) + vision/audio embedders kept in BF16            |
 | Quantization   | W8A8 INT8 (per-channel weight + per-token dynamic activation)                  |
 | Quantizer      | AMD Quark `0.12.post1`                                                         |
-| Model Size     | ~14 GB (safetensors shards)                                                    |
+| Model Size     | ~13 GB (safetensors shards)                                                    |
 | Original Size  | ~23.9 GB (BF16)                                                                |
-| Compression    | ~1.7× size reduction                                                           |
+| Compression    | ~1.8× size reduction                                                           |
 
 ### Quantization Scheme
 
