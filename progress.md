@@ -20,7 +20,7 @@ Deadline: **Aug 6, 2026, 8:59 AM PDT / 9:29 PM IST**.
 - After recreate: cd repo && RETAIL_PROVIDER=vllm RETAIL_BASE_URL=http://<new-ip>:8000/v1 RETAIL_MODEL=rajasingh012/gemma-4-12b-it-quark-w8a8-int8 uv run streamlit run app.py
   then uv run python bench/record_demo.py
 
-**Video status:** cue1 ✅ (rocm-smi real take) | cue2 ✅ (Streamlit recs) | cue3 ✅ (clarification) | cue4 ✅ (chip click) | cue5 ✅ (vLLM 0.26 + ROCm) | cue6 ✅ (vllm bench: 49.8 tok/s, 51 peak, 25.7s, 1280 tokens) | cue7 ✅ (Quark INT8 — recorded + muxed Aug 5) | cue8 ❌ NOT RECORDED (GitHub repo page — black placeholder)
+**Video status:** cue1 ✅ (rocm-smi real take) | cue2 ✅ (Streamlit recs) | cue3 ✅ (clarification) | cue4 ✅ (chip click) | cue5 ✅ (vLLM 0.26 + ROCm) | cue6 ✅ (vllm bench: 49.8 tok/s, 51 peak, 25.7s, 1280 tokens) | cue7 ✅ (Quark INT8 — recorded + muxed Aug 5) | cue8 ✅ (GitHub repo + HF model page, Playwright take Aug 5)
 **Hackathon deadline:** Aug 6, 2026 8:59 AM PDT — 1 day left
 
 ## ✅ DONE (2026-08-02): Gemma 4 12B INT8 uploaded to HuggingFace
