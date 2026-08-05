@@ -45,9 +45,9 @@
 
 ```
   AMD Quark 0.12          vLLM 0.26+rocm723        AMD Instinct MI300X
-  W8A8 INT8 quantize  →   --quantization quark  →   192 GB HBM3 · ROCm 7.2.4
-  23.9 GB → 14 GB         prefix caching            AITER attention
-  (1.7×)                  chunked prefill           local inference only
+  W8A8 INT8 quantize  →   --quantization quark  →   192 GB HBM3 · ROCm 7.2.3
+  23.9 GB → 13 GB         prefix caching            AITER attention
+  (1.8×)                  chunked prefill           local inference only
 ```
 
 - vLLM upgraded 0.23 → 0.26 on the AMD ROCm wheel index (ABI fixes automated)
@@ -56,12 +56,13 @@
 
 ### Slide 4: Performance (measured on MI300X)
 
-| Metric | 31B Dense | 26B A4B MoE |
-|--------|----------:|------------:|
-| Single throughput | 150 tok/s | **427 tok/s** |
-| Concurrency-8 | 652 tok/s | **1,575 tok/s** |
-| Median TTFT | ~35 ms | **~35 ms** |
-| Model VRAM | 58.9 GiB | **48.5 GiB** |
+| Metric | Value |
+|--------|------:|
+| Output throughput (single stream) | **49.8 tok/s** |
+| Peak output throughput | **51.0 tok/s** |
+| Median TTFT | ~55 ms |
+| TPOT | ~19.8 ms |
+| Benchmark | 10,240 input → 1,280 tokens in 25.7 s |
 
 ### Slide 5: Why it's different
 
@@ -79,7 +80,7 @@
 | 2. Agent works | 1:15 | 3 queries: full flow, clarification, refinement chips |
 | 3a. Live GPU | 0:30 | `amd-smi` utilization spiking during inference |
 | 3b. Speed | 0:40 | tok/s table, TTFT, concurrency sweep |
-| 3c. Quantization | 0:20 | Quark INT8: 23.9 → 14 GB, served with `--quantization quark` |
+| 3c. Quantization | 0:20 | Quark INT8: 23.9 → 13 GB, served with `--quantization quark` |
 | 4. Close | 0:30 | Repo URL + reproducibility |
 
 Total: ~3:40 (hard cap 5:00)

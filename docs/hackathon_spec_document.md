@@ -4,7 +4,7 @@
 **Team**: Rajasingh (Solo)
 **Project**: RetailConcierge — Conversational Shopping Agent on AMD MI300X
 **Date**: August 2026
-**Hardware**: AMD Instinct MI300X (Radeon Cloud 1-Click, 192 GB HBM3, ROCm 7.2.4)
+**Hardware**: AMD Instinct MI300X (Radeon Cloud 1-Click, 192 GB HBM3, ROCm 7.2.3)
 **Track**: Track 2 — Agentic AI (reasoning, planning, tool use, memory, RAG, multi-agent)
 
 ---
@@ -73,7 +73,7 @@ Architecture boundary: the app, catalog, and source live on the developer laptop
 
 | Model | Size | Quantization | Served via | Status |
 |-------|------|-------------|-----------|--------|
-| **Gemma 4 12B it (Unified)** | 23.9 GB BF16 → **14 GB INT8** | AMD Quark W8A8 (per-channel weight + per-token dynamic activation) | vLLM 0.26 `--quantization quark` | **Shipped** |
+| **Gemma 4 12B it (Unified)** | 23.9 GB BF16 → **13 GB INT8** | AMD Quark W8A8 (per-channel weight + per-token dynamic activation) | vLLM 0.26 `--quantization quark` | **Shipped** |
 | Gemma 4 26B A4B MoE (BF16) | 51.6 GB | none (MoE INT8 rejected — see §7) | vLLM 0.26 | fallback |
 
 The 12B INT8 checkpoint is **published publicly on Hugging Face** — [`rajasingh012/gemma-4-12b-it-quark-w8a8-int8`](https://huggingface.co/rajasingh012/gemma-4-12b-it-quark-w8a8-int8) — the first AMD Quark W8A8 INT8 quantization of Gemma 4 12B. Anyone can download and reproduce the inference story (base model: `google/gemma-4-12B-it`; 13 GB weights; model card documents the W8A8 scheme, compression, and accuracy caveats).
@@ -96,7 +96,7 @@ Two post-quantize fixups are automated (`scripts/_quark_fix_vllm_keys.py`): Quar
 
 | Technique | Impact | Details |
 |-----------|--------|---------|
-| **W8A8 INT8 quantization (AMD Quark 0.12)** | **1.7× smaller weights** (23.9 → 14 GB), 12.54 GiB weight footprint on GPU | Per-channel INT8 weights (ch_axis=0, symmetric, static) + per-token INT8 activations (ch_axis=1, symmetric, dynamic). No calibration data needed. Recipe provenance: nameistoken/Gemma-4-31B-it-Quark-W8A8-INT8 (−0.08pp GSM8K). |
+| **W8A8 INT8 quantization (AMD Quark 0.12)** | **1.8× smaller weights** (23.9 → 13 GB), ~12.1 GiB weight footprint on GPU | Per-channel INT8 weights (ch_axis=0, symmetric, static) + per-token INT8 activations (ch_axis=1, symmetric, dynamic). No calibration data needed. Recipe provenance: nameistoken/Gemma-4-31B-it-Quark-W8A8-INT8 (−0.08pp GSM8K). |
 | **vLLM 0.23 → 0.26 ROCm upgrade** | Unlocks `--quantization quark` serving | AMD wheel index (`wheels.vllm.ai/rocm/0.26.0/rocm723`); fixed ABI breaks (flash-attn, torchaudio, torch_c_dlpack_ext) live in `upgrade_vllm.sh` |
 | **AITER attention** | AMD-tuned attention/linear paths | `VLLM_USE_AITER=1` + `VLLM_ROCM_USE_AITER_FA=1` (flash attention), pinned in deploy |
 | **Prefix caching** | ~35 ms median TTFT server-side | `--enable-prefix-caching` — multi-turn sessions reuse cached prefixes (64% hit rate measured on 26B) |
@@ -104,17 +104,15 @@ Two post-quantize fixups are automated (`scripts/_quark_fix_vllm_keys.py`): Quar
 | **KV cache dtype auto-tune** | No uncalibrated fp8 KV warning | `KV_CACHE_DTYPE` env: `auto` for Quark INT8 (checkpoint has no KV scale factors), `fp8` for BF16 serving |
 | **Quark→vLLM key fixup** | Makes INT8 checkpoint vLLM-loadable | Debugged live: Quark's export naming ≠ vLLM gemma4_unified loader; fixup is automated in the pipeline |
 
-**Comparative performance (measured on MI300X, vLLM 0.23 BF16, ROCm 7.2.3):**
+**Comparative performance (measured on MI300X, vLLM 0.26 ROCm, ROCm 7.2.3 — 12B W8A8 INT8):**
 
-| Metric | 31B Dense (BF16) | 26B A4B MoE (BF16) |
-|--------|-----------------:|-------------------:|
-| Single-stream throughput | 150 tok/s | **427 tok/s** |
-| Concurrency-8 throughput | 652 tok/s | **1,575 tok/s** |
-| Median TTFT (server-side) | ~35 ms | **~35 ms** |
-| Prefix cache hit rate | 64% | **64%** |
-| Model VRAM | 58.9 GiB | **48.5 GiB** |
-
-The MoE uses 3.8B active parameters per token and is 3.69× faster than dense 31B at concurrency-8 with identical tool-calling flags.
+| Metric | Value |
+|--------|------:|
+| Output throughput (single stream) | **49.8 tok/s** |
+| Peak output throughput | **51.0 tok/s** |
+| Median TTFT | ~55 ms |
+| TPOT | ~19.8 ms |
+| Benchmark | 10,240 input → 1,280 generated tokens in 25.7 s |
 
 ---
 
