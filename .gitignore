@@ -3,6 +3,10 @@ retail_catalog.db
 *.bak
 *.bak2
 
+# Slim demo catalog for free-tier hosting is intentionally committed.
+# Build it with: uv run python scripts/build_chair_demo_db.py
+!retail_catalog_chair.db
+
 # Probe runtime artifacts
 data/dead_candidates.log
 data/probe_state.json
