@@ -1,0 +1,73 @@
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Trigger on every push to main. Excluding data/probe/bench outputs
+      # keeps the build cheap and avoids noisy redeploys when the audit
+      # log or a bench result is updated.
+      - "**"
+      - "!bench/results/**"
+      - "!data/probe_state.json"
+      - "!data/dead_candidates.log"
+      - "!data/needs_human_attention.txt"
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install huggingface_hub CLI
+        run: python -m pip install --quiet "huggingface_hub>=0.24"
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: rajasingh012/retail-concierge-demo
+        run: |
+          set -euo pipefail
+          # The HF Space was created once via the API (sdk=streamlit,
+          # app_file=app.py, hardware=cpu-basic). This job just syncs the
+          # repo contents into the Space.
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          api.upload_folder(
+              folder_path=".",
+              repo_id=os.environ["HF_SPACE_REPO"],
+              repo_type="space",
+              commit_message="deploy: sync from GitHub main",
+              # Skip files that are useless or wasteful in the Space image.
+              ignore_patterns=[
+                  "*.db.bak", "*.db.bak2",
+                  ".git/**", ".github/**",
+                  "data/abo/**",          # raw ABO source metadata, not used at runtime
+                  "docs/**",              # project docs, not needed by the app
+                  "scripts/**",           # import / probe / audit helpers
+                  "vendor/**",
+                  "tests/**",
+                  "bench/**",
+                  "__pycache__/**",
+                  "*.pyc",
+                  "*.bak",
+                  "*.bak2",
+                  ".venv/**",
+                  "DEPLOYMENT_JOURNAL.md",
+              ],
+          )
+          print(f"Pushed to https://huggingface.co/spaces/{os.environ['HF_SPACE_REPO']}")
+          PY
