@@ -8,6 +8,12 @@ The system never claims current prices, availability, shipping, ratings, or spec
 
 ![Track 2: Agentic AI](https://img.shields.io/badge/AMD-AI--DevMaster%202026-CC0000) ![GPU: MI300X](https://img.shields.io/badge/GPU-AMD%20Instinct%20MI300X-FF6B00) ![ROCm 7.2.3](https://img.shields.io/badge/ROCm-7.2.3-0086CB) ![vLLM 0.26.0+rocm723](https://img.shields.io/badge/vLLM-0.26.0%2Brocm723-7B68EE) ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB) ![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
+## Live demo
+
+**👉 [retail-concierge-9fz4fe3znfxcvqiqsncwxn.streamlit.app](https://retail-concierge-9fz4fe3znfxcvqiqsncwxn.streamlit.app/)** — Streamlit Community Cloud, served on a free-tier CPU.
+
+The deployed demo runs against the **chair-only subset** of the catalog (2,173 listings across CHAIR + BEAN_BAG_CHAIR; built by [`scripts/build_chair_demo_db.py`](scripts/build_chair_demo_db.py)). The full catalog used in the AMD MI300X bench (145K listings, 576 product types) is too large to ship to Streamlit's free-tier disk quota, so the live demo is intentionally limited to the chairs subcategory. The agent code is unchanged — every query path, ranking weight, and provenance gate runs identically against the chair subset.
+
 ## Quick start
 
 ```bash
