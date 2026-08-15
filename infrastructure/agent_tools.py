@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from agent_framework import tool
+from agent_framework import FunctionInvocationContext, tool
 
 from infrastructure.database import ABOCatalogRepository
 
@@ -72,33 +72,28 @@ def clamp_limit(limit: int, *, default: int, maximum: int) -> int:
 def build_tools(
     repository: ABOCatalogRepository,
     *,
-    catalog_tracker: Any = None,
     audit_logger: Any = None,
 ) -> list[Any]:
-    """Build MAF tools over the catalog. Optionally record observed item_ids.
+    """Build MAF tools over the catalog.
 
     Args:
         repository: ABO catalog repository.
-        catalog_tracker: Per-session item-id tracker; enforces
-            provenance-gating in ``finalize_recommendations``.
         audit_logger: Optional ``AuditLogger`` instance. When set, every
             tool invocation writes one hash-chained JSONL entry.
     """
     db_path = str(repository._conn)
     repo_namespace = f"{_CATALOG_NAMESPACE}::{db_path}"
 
-    def _record_observed(candidates: list[dict]) -> None:
-        if catalog_tracker is None:
+    def _record_observed(ctx: FunctionInvocationContext, candidates: list[dict]) -> None:
+        if ctx.session is None:
             return
-        record = getattr(catalog_tracker, "record", None)
-        if record is None:
-            return
-        item_ids = [
-            str(item.get("item_id"))
-            for item in candidates
-            if isinstance(item, dict) and item.get("item_id")
-        ]
-        record(item_ids)
+        seen = ctx.session.state.setdefault("seen_item_ids", set())
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("item_id")
+            if item_id:
+                seen.add(str(item_id))
 
     def _audit(tool: str, args: dict, result_meta: dict) -> None:
         if audit_logger is None:
@@ -183,6 +178,7 @@ def build_tools(
         ),
     )
     def search_catalog(
+        ctx: Annotated[FunctionInvocationContext, "MAF context (excluded from schema)"],
         query: Annotated[
             str,
             Field(description="Concrete title terms; use fewer terms to broaden"),
@@ -240,7 +236,7 @@ def build_tools(
                 start=1,
             )
         ]
-        _record_observed(candidates)
+        _record_observed(ctx, candidates)
         item_ids = [
             c.get("item_id") for c in candidates if isinstance(c, dict) and c.get("item_id")
         ]

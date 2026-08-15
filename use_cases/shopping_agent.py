@@ -1,11 +1,9 @@
 """Single conversational shopping agent with deterministic catalog safeguards."""
 from __future__ import annotations
 import json
-import threading
-from collections import OrderedDict
 from typing import Annotated, Any
 
-from agent_framework import Agent, tool
+from agent_framework import Agent, FunctionInvocationContext, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
@@ -13,12 +11,15 @@ from infrastructure.chat_clients import provider_extras
 
 from domain.recommendation import (
     FinalizedCandidate,
+    IntroBullet,
+    MAX_INTRO_BULLETS,
     MAX_RANKED_PRODUCTS,
     MAX_REFINEMENT_CHIPS,
     RankedItem,
     RecommendationResponse,
     RefinementChip,
     ShoppingBrief,
+    _coerce_intro_bullets,
     extract_json_object,
 )
 from use_cases.ranking import screen_and_rank_candidates
@@ -131,40 +132,40 @@ Final response:
                 "why_it_fits": ["..."], "trade_offs": ["..."]}],
     "assumptions": ["..."],
     "notes": ["..."],
-    "recommendation": "...",
+    "recommendation": [
+      {"subject": "<one of: item|brief|assumptions|dataset_notice>",
+       "claim_kind": "<one of: color|material|dimension|brand|product_type|intent_match|dataset_disclaimer|none>",
+       "item_id": "<required when subject=item, omitted otherwise>",
+       "text": "One sentence the user will read."}
+    ],
     "refinement_chips": [{"label": "...", "instruction": "..."}],
     "dataset_notice": "This is an offline product catalog snapshot..."
   }
-- At most 5 entries in "ranked" and 4 entries in "refinement_chips". Never
-  invent specifications, prices, ratings, availability, shipping, or warranties.
+- At most 5 entries in "ranked", 5 entries in "recommendation", and 4
+  entries in "refinement_chips". Never invent specifications, prices,
+  ratings, availability, shipping, or warranties.
+- The "recommendation" field is a STRUCTURED LIST of bullets, not a free-form
+  paragraph. Pick a (subject, claim_kind) pair for every bullet; the schema
+  rejects any value outside those enums. "subject=item" requires a non-empty
+  "item_id" that matches one of the ranked entries; other subjects must omit
+  "item_id". "claim_kind=dataset_disclaimer" only pairs with "subject=
+  dataset_notice". "claim_kind=intent_match" only pairs with "subject=brief".
+- The schema has no slot for "stock", "price", "shipping", "rating",
+  "warranty", or "discount" — if you try to assert any of those, the bullet
+  will be rejected. Use "claim_kind=none" for transitions, framing, or
+  any sentence that does not make a catalog claim. The catalog-scope
+  disclaimer is one bullet with subject=dataset_notice, claim_kind=
+  dataset_disclaimer, text=the dataset_notice string.
+- You may emit at most one "item" bullet per ranked item, and zero
+  "item" bullets if the intro has no per-item commentary. Most turns
+  use 2-4 bullets total: one brief framing, zero-or-more per-item
+  commentary, and the dataset_notice bullet.
 """
-
-
-class CatalogEvidenceTracker:
-    """Track item_ids observed by catalog tools for one shopping session."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._seen: OrderedDict[str, None] = OrderedDict()
-
-    def record(self, item_ids: list[str]) -> None:
-        with self._lock:
-            for item_id in item_ids:
-                self._seen.setdefault(item_id, None)
-
-    def snapshot(self) -> set[str]:
-        with self._lock:
-            return set(self._seen)
-
-    def reset(self) -> None:
-        with self._lock:
-            self._seen.clear()
 
 
 def _build_agent_tools(
     catalog_tools: list[Any],
     *,
-    tracker: CatalogEvidenceTracker,
     audit_logger: Any = None,
     catalog_vocabulary: dict[str, list[str]] | None = None,
 ) -> list[Any]:
@@ -177,7 +178,7 @@ def _build_agent_tools(
     return [
         _make_extract_brief_tool(catalog_vocabulary=catalog_vocabulary),
         *catalog_tools,
-        _make_finalize_tool(tracker, audit_logger=audit_logger),
+        _make_finalize_tool(audit_logger=audit_logger),
     ]
 
 
@@ -202,7 +203,6 @@ def build_shopping_agent(
     client: OpenAIChatCompletionClient,
     catalog_tools: list[Any],
     *,
-    tracker: CatalogEvidenceTracker | None = None,
     provider: str = "",
     audit_logger: Any = None,
     catalog_vocabulary: dict[str, list[str]] | None = None,
@@ -212,7 +212,6 @@ def build_shopping_agent(
     Args:
         client: MAF OpenAI-compatible chat client.
         catalog_tools: Search / brand / product-type tools.
-        tracker: Evidence tracker shared between catalog and finalizer tools.
         provider: Provider name (``"deepseek"``, ``"vllm"``, etc.).
             Provider-specific request extras (e.g. DeepSeek
             ``reasoning_split``) are looked up via ``provider_extras`` and
@@ -226,7 +225,6 @@ def build_shopping_agent(
             (validator) and to seed the system prompt with the canonical
             product_type / brand values the LLM should map to.
     """
-    tracker = tracker or CatalogEvidenceTracker()
     provider_options = provider_extras(provider) if provider else {}
     # Some vLLM versions (0.23) suppress tool calling when `response_format`
     # is set alongside `tools` — the model skips the tool-call loop and outputs
@@ -242,7 +240,6 @@ def build_shopping_agent(
         instructions=instructions,
         tools=_build_agent_tools(
             catalog_tools,
-            tracker=tracker,
             audit_logger=audit_logger,
             catalog_vocabulary=catalog_vocabulary,
         ),
@@ -287,15 +284,7 @@ def _format_vocabulary_section(label: str, terms: list[str]) -> str:
     return f"{label}:\n  {body}"
 
 
-def build_finalize_recommendations_tool(
-    audit_logger: Any = None,
-):
-    """Build the deterministic finalization tool and its bound tracker."""
-    tracker = CatalogEvidenceTracker()
-    return _make_finalize_tool(tracker, audit_logger=audit_logger), tracker
-
-
-def _make_finalize_tool(tracker: CatalogEvidenceTracker, audit_logger: Any = None):
+def _make_finalize_tool(audit_logger: Any = None):
     @tool(
         name=FINALIZE_RECOMMENDATIONS_TOOL,
         description=(
@@ -305,10 +294,22 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker, audit_logger: Any = Non
         ),
     )
     def finalize_recommendations(
+        ctx: Annotated[FunctionInvocationContext, "MAF context (excluded from schema)"],
         candidates: list[dict[str, Any]],
     ) -> dict[str, list[dict[str, Any]]]:
-        """Screen product identity and deterministically rank exact products."""
-        seen = tracker.snapshot()
+        """Screen product identity and deterministically rank exact products.
+
+        Reads the per-session ``seen_item_ids`` set written by
+        ``search_catalog`` (via ``ctx.session.state``) and the brief's
+        ``target_use`` / ``must_have`` written by ``extract_brief``.
+        """
+        state = ctx.session.state if ctx.session is not None else {}
+        seen = set(state.get("seen_item_ids") or ())
+        target_use = str(state.get("target_use") or "")
+        must_have_raw = state.get("must_have") or []
+        must_have_list: list[str] = [
+            m for m in must_have_raw if isinstance(m, str) and m.strip()
+        ]
         proposed_item_ids = [
             str(c.get("item_id"))
             for c in candidates
@@ -317,6 +318,8 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker, audit_logger: Any = Non
         result = screen_and_rank_candidates(
             {"candidates": candidates},
             allowed_item_ids=seen,
+            target_use=target_use,
+            must_have=must_have_list,
         )
         accepted_item_ids = [c.item_id for c in result["candidates"]]
         if audit_logger is not None:
@@ -324,7 +327,11 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker, audit_logger: Any = Non
             if record is not None:
                 record(
                     FINALIZE_RECOMMENDATIONS_TOOL,
-                    {"proposed_item_ids": proposed_item_ids},
+                    {
+                        "proposed_item_ids": proposed_item_ids,
+                        "target_use": target_use,
+                        "must_have": must_have_list,
+                    },
                     {
                         "accepted_item_ids": accepted_item_ids,
                         "provenance_blocked": [
@@ -343,8 +350,6 @@ def _make_finalize_tool(tracker: CatalogEvidenceTracker, audit_logger: Any = Non
         ]
         return result
 
-    finalize_recommendations._catalog_tracker = tracker  # type: ignore[attr-defined]
-    finalize_recommendations._audit_logger = audit_logger  # type: ignore[attr-defined]
     return finalize_recommendations
 
 
@@ -362,6 +367,10 @@ def _make_extract_brief_tool(catalog_vocabulary: dict[str, list[str]] | None = N
     is already seeded to reject off-vocabulary product_type / brand values.
     The tool body just re-validates and surfaces any rejection to MAF as a
     tool error, so the model gets a clean retry signal.
+
+    The validated brief's ``target_use`` and ``must_have`` are written to
+    ``ctx.session.state`` so the finalize tool can read them for the
+    intent-match tie-breaker.
     """
 
     @tool(
@@ -378,6 +387,7 @@ def _make_extract_brief_tool(catalog_vocabulary: dict[str, list[str]] | None = N
         ),
     )
     def extract_brief(
+        ctx: Annotated[FunctionInvocationContext, "MAF context (excluded from schema)"],
         brief: Annotated[
             dict[str, Any],
             Field(description="Structured shopping brief extracted from the user's request."),
@@ -388,9 +398,14 @@ def _make_extract_brief_tool(catalog_vocabulary: dict[str, list[str]] | None = N
         # body. Re-validate so the canonical typed model is the single source
         # of truth; reject shape/constraint violations back to the model.
         validated = ShoppingBrief.model_validate(brief)
+        # Surface the intent-relevant fields to the finalize tool via
+        # ``ctx.session.state``. Empty strings / lists mean the user did not
+        # specify them; the tie-breaker becomes a no-op in that case.
+        if ctx.session is not None:
+            ctx.session.state["target_use"] = validated.target_use
+            ctx.session.state["must_have"] = list(validated.must_have)
         return validated.model_dump()
 
-    extract_brief._catalog_vocabulary = catalog_vocabulary  # type: ignore[attr-defined]
     return extract_brief
 
 
@@ -462,15 +477,39 @@ def finalized_candidates_from_response(response: Any) -> list[FinalizedCandidate
     return latest
 
 
+# Catalog-truth disclaimer. The finalizer overwrites whatever the model emitted
+# and uses this string as the text of the synthetic dataset_disclaimer bullet
+# it appends when the model omitted one.
+CATALOG_NOTICE = (
+    "This is an offline product catalog snapshot with typed dimensions, "
+    "material, color, and brand metadata but no prices, ratings, or "
+    "live availability."
+)
+
+
+def enforce_dataset_notice(_notice: str | None) -> str:
+    """Return the catalog-truth disclaimer regardless of what the model wrote."""
+    return CATALOG_NOTICE
+
+
 def enforce_finalized_recommendation(
     recommendation: RecommendationResponse | dict[str, Any],
     finalized: list[FinalizedCandidate] | None,
 ) -> RecommendationResponse:
-    """Drop unknown products and restore deterministic candidate order and facts.
+    """Drop unknown products, restore deterministic candidate order, apply finalizer guards.
 
     Accepts either a ``RecommendationResponse`` (the typed result from MAF) or a
     plain dict (back-compat for callers that haven't migrated). Returns the
     typed model.
+
+    Guards applied here:
+
+    * Strip any intro bullet whose ``item_id`` no longer maps to a
+      surviving ranked item.
+    * Guarantee the dataset_disclaimer bullet is present; synthesize one
+      when the model omitted it.
+    * Overwrite ``dataset_notice`` with the catalog-truth constant so the
+      disclaimer cannot be paraphrased.
     """
     if finalized is None:
         raise ValueError(
@@ -515,18 +554,81 @@ def enforce_finalized_recommendation(
         if len(ranked) == MAX_RANKED_PRODUCTS:
             break
 
+    # Pull the intro bullets the agent produced (recommendation field) and
+    # the existing notes / assumptions so the guards can extend them.
     if isinstance(recommendation, RecommendationResponse):
-        return recommendation.model_copy(update={"ranked": ranked})
+        intro_bullets = list(recommendation.recommendation or [])
+        existing_notes = list(recommendation.notes or [])
+        existing_assumptions = list(recommendation.assumptions or [])
+    else:
+        raw = recommendation.get("recommendation", [])
+        intro_bullets = _coerce_intro_bullets(raw)
+        existing_notes = list(recommendation.get("notes", []) or [])
+        existing_assumptions = list(recommendation.get("assumptions", []) or [])
+
+    # Catalog-absent fact categories (stock, price, shipping, rating, warranty,
+    # discount) are rejected at the IntroBullet schema level — the enums have
+    # no slot for them. Here we make sure the dataset-disclaimer bullet is
+    # present; if the model omitted it, append a synthetic one so the user
+    # always sees the catalog-scope reminder.
+    has_disclaimer = any(
+        b.subject == "dataset_notice" and b.claim_kind == "dataset_disclaimer"
+        for b in intro_bullets
+    )
+    if not has_disclaimer:
+        intro_bullets.append(
+            IntroBullet(
+                subject="dataset_notice",
+                claim_kind="dataset_disclaimer",
+                text=CATALOG_NOTICE,
+            )
+        )
+
+    # Strip bullets that reference an item the finalizer dropped (an item
+    # in the agent's ranked list that the provenance gate above removed).
+    # The IntroBullet schema does not check item_id validity against the
+    # ranked list — it only checks that subject=item carries a non-empty
+    # item_id — so this finalizer-level check is what keeps a bullet from
+    # pointing at a phantom product.
+    existing_item_ids = {candidate.item_id for candidate in finalized}
+    stripped_item_bullets = [
+        b for b in intro_bullets
+        if b.subject == "item" and b.item_id not in existing_item_ids
+    ]
+    intro_bullets = [b for b in intro_bullets if b not in stripped_item_bullets]
+    for stripped in stripped_item_bullets:
+        note = (
+            f"Removed intro bullet referencing unknown item "
+            f"{stripped.item_id!r}"
+        )
+        if note not in existing_notes:
+            existing_notes.append(note)
+
+    # Cap to MAX_INTRO_BULLETS so a runaway model can't flood the UI.
+    intro_bullets = intro_bullets[:MAX_INTRO_BULLETS]
+
+    # Overwrite the dataset notice with the catalog-truth constant.
+    notice = enforce_dataset_notice(
+        recommendation.get("dataset_notice") if isinstance(recommendation, dict) else recommendation.dataset_notice
+    )
+
+    if isinstance(recommendation, RecommendationResponse):
+        return recommendation.model_copy(
+            update={
+                "ranked": ranked,
+                "recommendation": intro_bullets,
+                "notes": existing_notes,
+                "dataset_notice": notice,
+            }
+        )
     return RecommendationResponse(
         kind="recommendations",
         ranked=ranked,
-        assumptions=list(recommendation.get("assumptions", []) or []),
-        notes=list(recommendation.get("notes", []) or []),
-        recommendation=str(recommendation.get("recommendation", "") or ""),
+        assumptions=existing_assumptions,
+        notes=existing_notes,
+        recommendation=intro_bullets,
         refinement_chips=_parse_refinement_chips(recommendation.get("refinement_chips", [])),
-        dataset_notice=str(
-            recommendation.get("dataset_notice", RecommendationResponse.model_fields["dataset_notice"].default) or ""
-        ),
+        dataset_notice=notice,
     )
 
 
