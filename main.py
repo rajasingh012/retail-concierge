@@ -16,7 +16,6 @@ from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ABOCatalogRepository
 from use_cases import build_shopping_agent
 from use_cases.shopping_agent import (
-    CatalogEvidenceTracker,
     enforce_finalized_recommendation,
     finalized_candidates_from_response,
     structured_recommendation_from_response,
@@ -147,7 +146,6 @@ async def run_chat() -> None:
     repository = ABOCatalogRepository(database)
     provider = os.getenv("RETAIL_PROVIDER", DEFAULT_PROVIDER)
     client = resolve_client()
-    tracker = CatalogEvidenceTracker()
     audit_logger = None
     audit_path = os.getenv("RETAIL_AUDIT_LOG")
     if audit_path:
@@ -155,12 +153,11 @@ async def run_chat() -> None:
         audit_logger = AuditLogger(Path(audit_path))
     catalog_vocabulary = _load_catalog_vocabulary(repository)
     catalog_tools = _build_catalog_tools(
-        repository, catalog_tracker=tracker, audit_logger=audit_logger
+        repository, audit_logger=audit_logger
     )
     agent = build_shopping_agent(
         client,
         catalog_tools,
-        tracker=tracker,
         provider=provider,
         audit_logger=audit_logger,
         catalog_vocabulary=catalog_vocabulary,
@@ -185,7 +182,13 @@ async def run_chat() -> None:
             if not user_message or user_message.lower() in {"quit", "exit"}:
                 break
 
-            tracker.reset()
+            # Reset per-turn provenance state so item_ids from a previous
+            # turn are not treated as "seen this turn". target_use/must_have
+            # are overwritten fresh by extract_brief each turn, but clearing
+            # them here keeps the tie-breaker from reading stale intent.
+            session.state.pop("seen_item_ids", None)
+            session.state.pop("target_use", None)
+            session.state.pop("must_have", None)
             try:
                 response = await agent.run(user_message, session=session)
             except Exception as exc:
