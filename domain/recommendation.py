@@ -22,6 +22,25 @@ from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 MAX_RANKED_PRODUCTS = 5
 MAX_REFINEMENT_CHIPS = 5
+MAX_INTRO_BULLETS = 5
+
+INTRO_SUBJECTS = (
+    "item",          # This bullet refers to one specific ranked item. item_id is required.
+    "brief",         # This bullet refers to the user's stated intent.
+    "assumptions",   # This bullet surfaces a brief assumption.
+    "dataset_notice",  # The catalog-scope disclaimer line.
+)
+
+INTRO_CLAIM_KINDS = (
+    "color",         # Bullet mentions a color value.
+    "material",      # Bullet mentions a material value.
+    "dimension",     # Bullet mentions a dimension value.
+    "brand",         # Bullet mentions a brand.
+    "product_type",  # Bullet mentions a product category.
+    "intent_match",  # Bullet states why a product fits the user's target_use / must_have.
+    "dataset_disclaimer",  # Bullet is the catalog-scope disclaimer.
+    "none",          # Bullet makes no catalog claim (transitions, framing, prose-only).
+)
 
 # Cached catalog vocabularies populated lazily. The brief validator uses
 # these to gate the LLM-resolved product_type / brand against the catalog
@@ -105,6 +124,107 @@ class RefinementChip(BaseModel):
     instruction: str = Field(min_length=1, description="Self-contained refinement message")
 
 
+class IntroBullet(BaseModel):
+    """One sentence in the agent's introduction prose.
+
+    Each bullet carries a closed ``subject`` enum (item / brief / assumptions /
+    dataset_notice) and a closed ``claim_kind`` enum (color / material /
+    dimension / brand / product_type / intent_match / dataset_disclaimer /
+    none). Pydantic rejects any value outside the enum, so a model that wants
+    to write "in stock" must pick a ``claim_kind``, and no ``claim_kind`` in
+    the enum corresponds to a catalog-absent fact — the schema has no slot
+    for "stock" / "price" / "shipping" / "rating" / "warranty" / "discount".
+
+    The ``text`` field is free-form natural language; the category of claim
+    the sentence makes is locked at the schema level.
+
+    ``item_id`` is required when ``subject == "item"`` and forbidden
+    otherwise. ``dataset_disclaimer`` claim_kind is only valid with
+    ``dataset_notice`` subject. ``intent_match`` claim_kind is only valid with
+    ``brief`` subject. These cross-field rules are enforced by
+    :meth:`_validate_subject_claim_combo`.
+    """
+
+    subject: Literal["item", "brief", "assumptions", "dataset_notice"]
+    claim_kind: Literal[
+        "color",
+        "material",
+        "dimension",
+        "brand",
+        "product_type",
+        "intent_match",
+        "dataset_disclaimer",
+        "none",
+    ]
+    item_id: str = ""
+    text: str = Field(min_length=1, description="The sentence the user reads.")
+
+    @model_validator(mode="after")
+    def _validate_subject_claim_combo(self) -> "IntroBullet":
+        if self.subject == "item" and not self.item_id.strip():
+            raise ValueError(
+                "IntroBullet with subject='item' must carry an item_id "
+                "pointing at one of the ranked items"
+            )
+        if self.subject != "item" and self.item_id.strip():
+            raise ValueError(
+                f"IntroBullet with subject={self.subject!r} must not carry "
+                "an item_id; item_id is reserved for subject='item'"
+            )
+        if self.claim_kind == "dataset_disclaimer" and self.subject != "dataset_notice":
+            raise ValueError(
+                "IntroBullet with claim_kind='dataset_disclaimer' must use "
+                "subject='dataset_notice'"
+            )
+        if self.claim_kind == "intent_match" and self.subject != "brief":
+            raise ValueError(
+                "IntroBullet with claim_kind='intent_match' must use "
+                "subject='brief'"
+            )
+        return self
+
+
+def _coerce_intro_bullets(value: Any) -> list[IntroBullet]:
+    """Coerce ``recommendation`` payloads into ``list[IntroBullet]``.
+
+    Accepts:
+
+    * a real list of dicts that match :class:`IntroBullet`
+    * a single ``IntroBullet``-shaped dict (wrapped to a one-element list)
+    * a plain ``str`` (legacy shape from older model outputs) — wrapped to a
+      single ``IntroBullet(subject="brief", claim_kind="none", text=...)``
+      so old model outputs still parse
+    * an empty string — returns ``[]``
+
+    Anything else returns ``[]`` so the agent loop can proceed; the
+    renderer treats an empty list as "no intro" the same as an absent
+    field.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        return [IntroBullet(subject="brief", claim_kind="none", text=text)]
+    if isinstance(value, dict):
+        return [IntroBullet.model_validate(value)]
+    if isinstance(value, list):
+        bullets: list[IntroBullet] = []
+        for item in value:
+            if isinstance(item, IntroBullet):
+                bullets.append(item)
+            elif isinstance(item, dict):
+                bullets.append(IntroBullet.model_validate(item))
+            elif isinstance(item, str) and item.strip():
+                return [IntroBullet(subject="brief", claim_kind="none", text=item.strip())]
+        return bullets
+    return []
+
+
+_IntroBullets = Annotated[list[IntroBullet], BeforeValidator(_coerce_intro_bullets)]
+
+
 class RankedItem(BaseModel):
     """One evidence-backed product in the final recommendation list."""
 
@@ -131,7 +251,17 @@ class RecommendationResponse(BaseModel):
     )
     assumptions: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
-    recommendation: str = ""
+    recommendation: _IntroBullets = Field(
+        default_factory=list,
+        max_length=MAX_INTRO_BULLETS,
+        description=(
+            "Structured intro bullets. Each bullet carries a closed "
+            "(subject, claim_kind) pair so the model cannot emit a "
+            "catalog-absent fact (price, rating, stock, shipping, "
+            "warranty, discount). Old string-shaped payloads are coerced "
+            "to a single (brief, none) bullet for back-compat."
+        ),
+    )
     refinement_chips: list[RefinementChip] = Field(
         default_factory=list,
         max_length=MAX_REFINEMENT_CHIPS,
@@ -368,6 +498,11 @@ def extract_json_object(text: str) -> str:
 __all__ = [
     "MAX_RANKED_PRODUCTS",
     "MAX_REFINEMENT_CHIPS",
+    "MAX_INTRO_BULLETS",
+    "INTRO_SUBJECTS",
+    "INTRO_CLAIM_KINDS",
+    "IntroBullet",
+    "_coerce_intro_bullets",
     "RefinementChip",
     "RankedItem",
     "RecommendationResponse",
