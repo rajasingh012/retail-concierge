@@ -23,7 +23,6 @@ from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ABOCatalogRepository
 from use_cases import build_shopping_agent
 from use_cases.shopping_agent import (
-    CatalogEvidenceTracker,
     enforce_finalized_recommendation,
     finalized_candidates_from_response,
     structured_recommendation_from_response,
@@ -77,11 +76,9 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     repository = ABOCatalogRepository(args.database)
     stats = repository.stats()
     client = build_chat_client(args.provider, args.model)
-    tracker = CatalogEvidenceTracker()
     agent = build_shopping_agent(
         client,
-        build_catalog_tools(repository, catalog_tracker=tracker),
-        tracker=tracker,
+        build_catalog_tools(repository),
         provider=args.provider,
     )
     scenarios = SAMPLE_SCENARIOS[: max(1, min(args.turns, len(SAMPLE_SCENARIOS)))]
@@ -95,7 +92,6 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         for index, scenario in enumerate(scenarios, start=1):
             before = cache_stats()
             started = time.perf_counter()
-            tracker.reset()
             response = await agent.run(scenario, session=agent.create_session())
             elapsed = time.perf_counter() - started
             after = cache_stats()

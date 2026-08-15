@@ -9,6 +9,7 @@ requires a live model.
 from __future__ import annotations
 
 import pytest
+from agent_framework import AgentSession, FunctionInvocationContext
 from pydantic import ValidationError
 
 from domain.recommendation import ShoppingBrief
@@ -17,7 +18,15 @@ from use_cases.shopping_agent import (
     _build_agent_tools,
     _make_extract_brief_tool,
 )
-from use_cases.shopping_agent import CatalogEvidenceTracker
+
+
+def _make_ctx() -> FunctionInvocationContext:
+    """Build a minimal MAF invocation context bound to a fresh session."""
+    return FunctionInvocationContext(
+        function=None,  # type: ignore[arg-type]
+        arguments={},
+        session=AgentSession(),
+    )
 
 
 def test_extract_brief_tool_is_built_with_correct_name() -> None:
@@ -39,7 +48,7 @@ def test_extract_brief_tool_returns_canonical_brief_dict() -> None:
         "assumptions": ["15000 INR converted to ~60 USD at 0.012"],
         "evidence_gaps": ["no stated brand or color"],
     }
-    result = tool_obj(brief=raw)
+    result = tool_obj(ctx=_make_ctx(), brief=raw)
     assert isinstance(result, dict)
     assert result["intent"] == "wireless earbuds for a pair, budget around 5k rupees"
     assert result["search_terms"] == "wireless earbuds"
@@ -63,7 +72,7 @@ def test_extract_brief_tool_accepts_partial_brief() -> None:
         "target_use": "open-plan office",
         "nice_to_have": ["noise_cancelling"],
     }
-    result = tool_obj(brief=raw)
+    result = tool_obj(ctx=_make_ctx(), brief=raw)
     assert result["nice_to_have"] == ["noise_cancelling"]
     assert result["target_use"] == "open-plan office"
     assert result["budget_usd"] == 0.0
@@ -81,7 +90,7 @@ def test_extract_brief_tool_rejects_negative_budget() -> None:
         "budget_usd": -10.0,
     }
     with pytest.raises(ValidationError):
-        tool_obj(brief=raw)
+        tool_obj(ctx=_make_ctx(), brief=raw)
 
 
 def test_extract_brief_tool_rejects_zero_quantity() -> None:
@@ -93,7 +102,7 @@ def test_extract_brief_tool_rejects_zero_quantity() -> None:
         "quantity": 0,
     }
     with pytest.raises(ValidationError):
-        tool_obj(brief=raw)
+        tool_obj(ctx=_make_ctx(), brief=raw)
 
 
 def test_extract_brief_tool_rejects_negative_dimension() -> None:
@@ -105,7 +114,7 @@ def test_extract_brief_tool_rejects_negative_dimension() -> None:
         "max_dimension_cm": -5.0,
     }
     with pytest.raises(ValidationError):
-        tool_obj(brief=raw)
+        tool_obj(ctx=_make_ctx(), brief=raw)
 
 
 def test_shopping_brief_schema_includes_all_fields() -> None:
@@ -122,5 +131,5 @@ def test_shopping_brief_schema_includes_all_fields() -> None:
 
 def test_agent_tools_canonical_order_unchanged() -> None:
     """The extract_brief tool sits first in the canonical tool order."""
-    tools = _build_agent_tools([], tracker=CatalogEvidenceTracker())
+    tools = _build_agent_tools([])
     assert tools[0].name == EXTRACT_BRIEF_TOOL

@@ -33,7 +33,6 @@ from infrastructure.database import ABOCatalogRepository
 from use_cases.shopping_agent import (
     EXTRACT_BRIEF_TOOL,
     FINALIZE_RECOMMENDATIONS_TOOL,
-    CatalogEvidenceTracker,
     build_shopping_agent,
     finalized_candidates_from_response,
     structured_recommendation_from_response,
@@ -103,9 +102,8 @@ async def main() -> int:
     model = os.getenv("RETAIL_MODEL", "deepseek-v4-flash")
     print(f"Provider: {provider}  Model: {model}")
     client = build_chat_client(provider, model)
-    tracker = CatalogEvidenceTracker()
-    catalog_tools = build_tools(repo, catalog_tracker=tracker)
-    agent = build_shopping_agent(client, catalog_tools, tracker=tracker, provider=provider)
+    catalog_tools = build_tools(repo)
+    agent = build_shopping_agent(client, catalog_tools, provider=provider)
 
     results = []
     for idx, (skill, query) in enumerate(PROBES, start=1):
