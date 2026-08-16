@@ -7,6 +7,9 @@ from agent_framework import Agent, FunctionInvocationContext, tool
 from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import Field
 
+from infrastructure.catalog_vocabulary_provider import (
+    CatalogVocabularyProvider,
+)
 from infrastructure.chat_clients import provider_extras
 
 from domain.recommendation import (
@@ -221,9 +224,22 @@ def build_shopping_agent(
         audit_logger: Optional ``AuditLogger``; finalize_recommendations
             records one entry per call with the screening outcomes.
         catalog_vocabulary: Optional ``{"product_types": [...], "brands": [...]}``
-            catalog terms used to gate the brief against the catalog
-            (validator) and to seed the system prompt with the canonical
-            product_type / brand values the LLM should map to.
+            catalog terms. Used in two places, by two different layers:
+
+            1. The brief-time Pydantic validator
+               (``set_catalog_vocabulary``) is the GATE — it rejects
+               product_type / brand values the model produces that are
+               not in this set.
+            2. A ``CatalogVocabularyProvider`` registered on the agent
+               via ``context_providers`` is the HINT — it surfaces the
+               same vocabulary to the LLM on every model call so the
+               model can pick from the right list in the first place.
+
+            Both layers share one vocabulary list so they cannot drift.
+            The provider is the MAF-canonical pattern (ADR 0016 +
+            ``samples/02-agents/context_providers/simple_context_provider.py``);
+            we no longer bake the vocabulary into the static
+            ``instructions=`` payload.
     """
     provider_options = provider_extras(provider) if provider else {}
     # Some vLLM versions (0.23) suppress tool calling when `response_format`
@@ -234,54 +250,37 @@ def build_shopping_agent(
     # content.
     default_options = dict(provider_options)
     _seed_brief_validator(catalog_vocabulary)
-    instructions = _compose_instructions(catalog_vocabulary)
     return Agent(
         client=client,
-        instructions=instructions,
+        instructions=SHOPPING_AGENT_INSTRUCTIONS,
         tools=_build_agent_tools(
             catalog_tools,
             audit_logger=audit_logger,
             catalog_vocabulary=catalog_vocabulary,
         ),
+        context_providers=[_build_vocabulary_provider(catalog_vocabulary)],
         default_options=default_options,
     )
 
 
-def _compose_instructions(catalog_vocabulary: dict[str, list[str]] | None) -> str:
-    """Append the canonical product_type / brand vocabulary to the prompt.
+def _build_vocabulary_provider(
+    catalog_vocabulary: dict[str, list[str]] | None,
+) -> CatalogVocabularyProvider:
+    """Construct the MAF ContextProvider that injects the catalog vocab.
 
-    Keeps the static ``SHOPPING_AGENT_INSTRUCTIONS`` readable; the appended
-    section is small, deterministic, and refreshed on each agent build
-    (which is per-process, not per-turn).
+    Always returns a provider (an empty vocabulary still produces a
+    provider that no-ops via ``body_has_content``), so the agent has a
+    stable context_providers list regardless of catalog state.
     """
-    if not catalog_vocabulary:
-        return SHOPPING_AGENT_INSTRUCTIONS
-    types_section = _format_vocabulary_section(
-        "CATALOG_PRODUCT_TYPES", catalog_vocabulary.get("product_types") or []
+    product_types: list[str] = []
+    brands: list[str] = []
+    if catalog_vocabulary:
+        product_types = list(catalog_vocabulary.get("product_types") or [])
+        brands = list(catalog_vocabulary.get("brands") or [])
+    return CatalogVocabularyProvider(
+        product_types=product_types,
+        brands=brands,
     )
-    brands_section = _format_vocabulary_section(
-        "CATALOG_BRANDS", catalog_vocabulary.get("brands") or []
-    )
-    return (
-        SHOPPING_AGENT_INSTRUCTIONS
-        + "\n\nCatalog vocabulary:\n"
-        + types_section
-        + "\n"
-        + brands_section
-    )
-
-
-def _format_vocabulary_section(label: str, terms: list[str]) -> str:
-    """Format a vocabulary list. Capped at 80 entries / 2,000 chars for prompt budget."""
-    if not terms:
-        return f"{label}: (catalog has no entries yet)"
-    capped = [str(t) for t in terms[:80] if t]
-    body = ", ".join(capped)
-    if len(capped) < len(terms):
-        body += f", ... (+{len(terms) - len(capped)} more)"
-    if len(body) > 2_000:
-        body = body[:1_997] + "..."
-    return f"{label}:\n  {body}"
 
 
 def _make_finalize_tool(audit_logger: Any = None):
