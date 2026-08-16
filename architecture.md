@@ -4,7 +4,7 @@
 
 ```mermaid
 graph LR
-  domain["domain/<br/>catalog evidence contracts"]
+  domain["domain/<br/>catalog evidence contracts + IntroBullet schema"]
   use_cases["use_cases/<br/>shopping agent + ranking"]
   infra["infrastructure/<br/>SQLite FTS5 + MAF tools + chat clients"]
   scripts["scripts/<br/>importer + vLLM launcher + audit_verify"]
@@ -34,34 +34,36 @@ RetailConcierge is one MAF `Agent` responsible for the complete user conversatio
 - call `extract_brief` first to produce a structured brief via LLM tool calling
 - ask only blocking clarification questions (capped at 2 per turn by the brief tool)
 - call `find_product_types` and `find_brands` to canonicalize names against the catalog
-- call `search_catalog` to retrieve BM25 candidates
+- call `search_catalog` to retrieve BM25 candidates, writing observed `item_id`s into `ctx.session.state`
 - classify every retrieved item as `exact_product`, `accessory`, `unrelated`, or `uncertain`
-- call `finalize_recommendations` for the catalog-provenance gate and deterministic ranking
-- explain supported recommendations and evidence gaps
+- call `finalize_recommendations` to drop anything not seen by `search_catalog` this session, keep only `exact_product`, apply deterministic weighted ranking with the intent-match tie-breaker, and emit the typed `IntroBullet` recommendation list
+- after `finalize_recommendations`, narrate supported picks and evidence gaps; the bullet list itself is the ground truth
 
 The five MAF tools, in call order:
 
 | Tool | What it does |
 |---|---|
-| `extract_brief` | LLM fills a `ShoppingBrief` Pydantic model; tool body validates (typed currency / dimension / quantity conversion, vocabulary gate). |
+| `extract_brief` | LLM fills a `ShoppingBrief` Pydantic model; tool body validates (typed currency / dimension / quantity conversion, vocabulary gate). Writes `target_use` and `must_have` into `ctx.session.state`. |
 | `find_product_types` | LIKE-match against the `product_type` column, ordered by listing count. |
 | `find_brands` | Three-tier resolution: exact prefix → FTS5 → LIKE fallback. Handles misspellings and case. |
-| `search_catalog` | BM25 via FTS5, up to 50 candidates with optional type / brand / dimension filters. Records observed `item_id` values into the session's tracker. |
-| `finalize_recommendations` | Drops candidates whose `item_id` was not seen by `search_catalog` in this session, keeps only `exact_product`, applies deterministic multi-field ranking. Returns the authoritative order. |
+| `search_catalog` | BM25 via FTS5, up to 50 candidates with optional type / brand / dimension filters. Writes returned `item_id` values into `ctx.session.state['seen_item_ids']`. |
+| `finalize_recommendations` | Reads `seen_item_ids` / `target_use` / `must_have` from `ctx.session.state`. Drops candidates whose `item_id` was not seen by `search_catalog` in this session, keeps only `exact_product`, applies deterministic multi-field ranking with the intent-match tie-breaker, and returns the typed result with its `IntroBullet` recommendation list. |
+
+Per-shopper memory lives entirely on the MAF `AgentSession` object — `seen_item_ids`, `target_use`, `must_have`. The CLI creates one `AgentSession` and reuses it across turns; Streamlit's "New Session" button creates a fresh one. There is no process-wide or closure-captured state.
 
 ## Conversation
 
 ```mermaid
 flowchart TD
   user(["user message / refinement"])
-  brief["extract_brief<br/>(LLM fills ShoppingBrief)"]
+  brief["extract_brief<br/>(LLM fills ShoppingBrief<br/>+ writes target_use, must_have to session.state)"]
   qcheck{brief complete?}
   question["concise question<br/>max 2 per turn"]
   resolve["find_product_types / find_brands<br/>(canonicalize against catalog)"]
-  search["search_catalog<br/>(BM25 + filters)<br/>records item_ids to tracker"]
+  search["search_catalog<br/>(BM25 + filters)<br/>writes item_ids to session.state"]
   classify["classify each item<br/>exact_product / accessory /<br/>unrelated / uncertain"]
-  finalize["finalize_recommendations<br/>• provenance gate<br/>• deterministic ranking<br/>• audit-log entry"]
-  out["protected ranked products<br/>+ evidence notes<br/>+ assumptions<br/>+ refinement chips<br/>+ audit-log entry"]
+  finalize["finalize_recommendations<br/>• provenance gate (drop ∉ session.state)<br/>• deterministic ranking<br/>• intent-match tie-breaker<br/>• IntroBullet schema validation<br/>• audit-log entry"]
+  out["protected ranked products<br/>+ typed IntroBullet list<br/>+ evidence notes<br/>+ assumptions<br/>+ refinement chips<br/>+ audit-log entry"]
 
   user --> brief
   brief --> qcheck
@@ -76,6 +78,39 @@ flowchart TD
 ```
 
 The default path shows products without interruption. Compatibility uncertainty, fundamentally different product interpretations, conflicting explicit constraints, or silent relaxation of a must-have can trigger one question. Missing budget, brand, color, or a nice-to-have does not block useful results.
+
+## Recommendation output contract
+
+The bullet list the shopper sees is a typed list of `IntroBullet` (Pydantic model in `domain/recommendation.py`), not free-form prose. Two closed enums lock the schema:
+
+- `subject`: one of `brief`, `item`, `catalog`, `dataset`.
+- `claim_kind`: a closed set bounded by what the catalog can evidence
+  (`price`, `stock`, `shipping`, `rating`, `warranty`, `discount`) plus
+  structural kinds (`intent_match`, `dataset_disclaimer`, `none`, …).
+  No ad-hoc claim category can be emitted.
+
+A pair of cross-field validators enforces invariants:
+
+- `subject='item'` must carry an `item_id`; `subject='brief'` must not.
+- `claim_kind='dataset_disclaimer'` must be about the dataset itself.
+- `claim_kind='intent_match'` must reference `target_use` or `must_have`.
+
+On top of validation, the finalizer applies three runtime guards before the response is returned:
+
+1. A synthetic `dataset_disclaimer` bullet is appended so shoppers
+   see "this is a dataset snapshot, not a live storefront."
+2. Phantom-item bullets — items the model proposed but that were not
+   in `search_catalog` output — are stripped. The provenance gate in
+   `finalize_recommendations` already keeps them out of the ranked
+   list; this guard keeps them out of the prose bullets too.
+3. Any `CATALOG_NOTICE` overwrite is re-applied after the guard pass,
+   so a finalizer cannot quietly remove the catalog-disclosure line.
+
+Legacy string bullets are coerced into `IntroBullet` via a `BeforeValidator`, so older tool payloads still validate without code changes elsewhere. Implementation: `domain/recommendation.py` (schema + validators), `use_cases/shopping_agent.py` (runtime guards).
+
+### Intent-match tie-breaker
+
+`screen_and_rank_candidates` ranks by a deterministic weighted score (price / rating / stock / brand / type match). When two candidates tie on that primary score, `_target_use_match_score` supplies a secondary key that prefers the candidate whose `target_use` overlaps the shopper's brief. The primary score is never overridden — the tie-breaker only resolves draws, so the existing ranking contracts stay intact.
 
 ## Catalog
 
@@ -117,7 +152,7 @@ erDiagram
   }
 ```
 
-FTS5 returns BM25-ordered candidates with optional SQL filters for product type and dimension. `search_catalog` records returned `item_id`s into the session's tracker; `finalize_recommendations` drops anything not seen — invented IDs cannot reach the displayed list. The catalog carries no prices, ratings, popularity, or availability; the system never claims any of those. Implementation: `infrastructure/database.py`, `use_cases/ranking.py`.
+FTS5 returns BM25-ordered candidates with optional SQL filters for product type and dimension. `search_catalog` records returned `item_id`s into the session's `ctx.session.state`; `finalize_recommendations` reads that state and drops anything not seen — invented IDs cannot reach the displayed list or the bullet list. The catalog carries no prices, ratings, popularity, or availability; the IntroBullet `claim_kind` enum reflects this. Implementation: `infrastructure/database.py`, `use_cases/ranking.py`.
 
 ## Misspelling, foreign-language, and paraphrase handling
 
@@ -125,7 +160,7 @@ FTS5 returns BM25-ordered candidates with optional SQL filters for product type 
 
 ## Session boundary
 
-The CLI creates one `AgentSession` and reuses it until the user exits. MAF stores the turn history in that session, allowing a clarification answer or refinement to continue the same conversation. The CLI does not persist sessions across process restarts.
+The CLI creates one `AgentSession` and reuses it until the user exits. MAF stores the turn history in that session, allowing a clarification answer or refinement to continue the same conversation. Between turns of the same conversation, `seen_item_ids` / `target_use` / `must_have` are reset on `ctx.session.state` so each new user message starts with a clean provenance scope. The CLI does not persist sessions across process restarts. Streamlit uses the same `AgentSession` object per active chat; "New Session" creates a fresh one.
 
 ## Benchmark
 
@@ -159,20 +194,20 @@ flowchart LR
 
 ### Provenance gate artifact (what gets logged per finalize call)
 
-When `finalize_recommendations` runs, the log records the full picture: every item_id the model proposed, every item_id that survived the gate, and — crucially — every item_id the model tried to slip in that wasn't actually returned by `search_catalog` in this session. A clean log has empty `provenance_blocked`; a populated one is the audit story.
+When `finalize_recommendations` runs, the log records the full picture: every item_id the model proposed, every item_id that survived the gate, and — crucially — every item_id the model tried to slip in that wasn't actually returned by `search_catalog` in this session. A clean log has empty `provenance_blocked`; a populated one is the audit story. The "seen this session" set is read from `ctx.session.state['seen_item_ids']`.
 
 ```mermaid
 flowchart LR
   proposed["model proposes<br/>to finalize_recommendations"]
-  tracker["session tracker<br/>(item_ids from search_catalog)"]
-  gate["provenance gate<br/>drop ∉ tracker"]
+  state["ctx.session.state<br/>(item_ids from search_catalog)"]
+  gate["provenance gate<br/>drop ∉ session.state"]
   accepted["accepted_item_ids<br/>displayed to user"]
   blocked["provenance_blocked<br/>audit-only,<br/>never displayed"]
 
   proposed --> gate
-  tracker --> gate
-  gate -- "in tracker" --> accepted
-  gate -- "not in tracker" --> blocked
+  state --> gate
+  gate -- "in session.state" --> accepted
+  gate -- "not in session.state" --> blocked
 ```
 
 Opt-in via `RETAIL_AUDIT_LOG=./retail_audit.jsonl`. Verify with `python scripts/audit_verify.py retail_audit.jsonl` (stdlib only, works on the demo droplet without a venv). Implementation: `infrastructure/audit.py`, `scripts/audit_verify.py`; tests in `tests/test_audit_log.py`.
