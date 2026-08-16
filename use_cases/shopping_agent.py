@@ -46,7 +46,13 @@ Catalog workflow:
    brief is the single source of truth for the rest of the turn.
 1. Call find_product_types only when an exact catalog product_type will
    materially narrow retrieval.
-2. Call find_brands to resolve brand names against the catalog.
+2. Call find_brands BEFORE search_catalog whenever the user named a brand
+   (even implicitly — "BoAt", "Samsung Galaxy", "Logitech", case variations,
+   misspellings, transliterations). find_brands does three-tier resolution
+   (exact prefix -> FTS5 -> LIKE fallback) against the actual catalog. If
+   it returns [], the catalog has no matching brand and you MUST fall back
+   to BM25 on the title text — do not invent a brand. Record the named brand
+   in evidence_gaps when it cannot be resolved so the user sees it.
 3. Call search_catalog with concrete title terms and limit=50. Broaden the title
    terms once if too few useful candidates are returned. If all searches return
    empty or only unrelated items, respond with an honest note — do not invent.
@@ -87,12 +93,13 @@ Canonicalization against the catalog vocabulary:
   chr"), pick the closest catalog value. Leave the field empty only when no
   catalog category fits. The runtime validator rejects off-vocabulary values,
   so do not invent.
-- brand: when the user names a brand, return the EXACT value from the supplied
-  CATALOG_BRANDS list. Misspellings ("logtec"), foreign spellings, and case
-  variations ("logitech" vs "Logitech" vs "LOGITECH") all normalize to the
-  catalog spelling. Leave empty when the user did not specify a brand or used
-  a name not present in the catalog. The runtime validator rejects off-vocabulary
-  values.
+- brand: when the user names a brand, write it as the user wrote it
+  (e.g. "BoAt", "Samsung Galaxy", "Logitech", case variations,
+  misspellings, transliterations). Do not invent a spelling the user did
+  not say. Do not leave empty if the user named one — the search-time
+  find_brands tool resolves against the actual catalog. If the user did
+  not specify a brand, leave the field empty. There is no brief-time
+  brand validator; canonicalization is deferred to find_brands.
 - search_terms: if the user's literal terms would return zero BM25 hits
   (misspelling, foreign language, paraphrased), include a corrected / normalized
   form alongside the literal terms so search_catalog has both. E.g.
@@ -198,7 +205,6 @@ def _seed_brief_validator(catalog_vocabulary: dict[str, list[str]] | None) -> No
 
     set_catalog_vocabulary(
         set(catalog_vocabulary.get("product_types") or []),
-        set(catalog_vocabulary.get("brands") or []),
     )
 
 
@@ -223,19 +229,24 @@ def build_shopping_agent(
             by the server.
         audit_logger: Optional ``AuditLogger``; finalize_recommendations
             records one entry per call with the screening outcomes.
-        catalog_vocabulary: Optional ``{"product_types": [...], "brands": [...]}``
+        catalog_vocabulary: Optional ``{"product_types": [...]}``
             catalog terms. Used in two places, by two different layers:
 
             1. The brief-time Pydantic validator
-               (``set_catalog_vocabulary``) is the GATE — it rejects
-               product_type / brand values the model produces that are
-               not in this set.
+               (``set_catalog_vocabulary``) is the GATE for product_type
+               only — it rejects product_type values the model produces
+               that are not in this set. Brands are NOT gated here.
             2. A ``CatalogVocabularyProvider`` registered on the agent
                via ``context_providers`` is the HINT — it surfaces the
-               same vocabulary to the LLM on every model call so the
+               product_type list to the LLM on every model call so the
                model can pick from the right list in the first place.
 
-            Both layers share one vocabulary list so they cannot drift.
+            Brand canonicalization happens at search time via the
+            ``find_brands`` tool (three-tier resolution against the live
+            catalog), not at brief-extraction time.
+
+            Both product_type layers share one vocabulary list so they
+            cannot drift.
             The provider is the MAF-canonical pattern (ADR 0016 +
             ``samples/02-agents/context_providers/simple_context_provider.py``);
             we no longer bake the vocabulary into the static
@@ -273,13 +284,10 @@ def _build_vocabulary_provider(
     stable context_providers list regardless of catalog state.
     """
     product_types: list[str] = []
-    brands: list[str] = []
     if catalog_vocabulary:
         product_types = list(catalog_vocabulary.get("product_types") or [])
-        brands = list(catalog_vocabulary.get("brands") or [])
     return CatalogVocabularyProvider(
         product_types=product_types,
-        brands=brands,
     )
 
 

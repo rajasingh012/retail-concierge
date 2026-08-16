@@ -43,16 +43,18 @@ INTRO_CLAIM_KINDS = (
 )
 
 # Cached catalog vocabularies populated lazily. The brief validator uses
-# these to gate the LLM-resolved product_type / brand against the catalog
-# so misspelled / hallucinated mappings are rejected deterministically
-# instead of silently passed through to search_catalog.
+# these to gate the LLM-resolved product_type against the catalog so
+# misspelled / hallucinated mappings are rejected deterministically
+# instead of silently passed through to search_catalog. Brands are NOT
+# gated here — canonicalization happens at search time via find_brands
+# (FTS5 + LIKE fallback), and the ABO catalog has no brand vocabulary
+# useful enough to be worth the prompt-injection cost.
 _VOCAB: dict[str, set[str]] = {}
 
 
-def set_catalog_vocabulary(product_types: set[str], brands: set[str]) -> None:
+def set_catalog_vocabulary(product_types: set[str]) -> None:
     """Seed the brief validator with the catalog's known vocabulary."""
     _VOCAB["product_types"] = {t.strip() for t in product_types if t.strip()}
-    _VOCAB["brands"] = {b.strip() for b in brands if b.strip()}
 
 
 def _vocab(field: str) -> set[str]:
@@ -368,25 +370,28 @@ class ShoppingBrief(BaseModel):
 
     @model_validator(mode="after")
     def _gate_against_catalog_vocabulary(self) -> "ShoppingBrief":
-        """Reject product_type / brand values not in the seeded catalog vocabulary.
+        """Reject product_type values not in the seeded catalog vocabulary.
 
-        ``extract_brief`` runs once per turn and is the single point where the
-        LLM maps the user's words to canonical catalog values. Misspellings,
-        foreign-language input ("chaise de bureau"), and paraphrases
-        ("executive seating") all funnel through this validator.
+        ``extract_brief`` runs once per turn and is the single point where
+        the LLM maps the user's words to canonical catalog values.
+        Misspellings, foreign-language input ("chaise de bureau"), and
+        paraphrases ("executive seating") all funnel through this
+        validator for ``product_type``.
 
         Gating here means the LLM cannot silently pass a wrong
-        product_type / brand into search_catalog and silently get an empty
+        product_type into search_catalog and silently get an empty
         result set. The validator rejects with a clear error message and
         MAF returns the error to the model, which then retries with the
         correct canonical value (or omits the field, falling back to
         catalog-search-time discovery).
 
         Empty values bypass the gate — "not specified" is a valid brief
-        state. Off-vocab values the LLM wrote deliberately (e.g.
-        user-restated brand that genuinely is not in the catalog)
-        are rejected so the human-visible evidence_gaps list stays honest
-        about why the search returned empty.
+        state.
+
+        Brands are NOT gated at this layer (see set_catalog_vocabulary).
+        Canonical brand resolution happens at search time via
+        ``find_brands`` (FTS5 + LIKE fallback). The brief stores the
+        brand as the user / LLM wrote it.
         """
         product_type = (self.product_type or "").strip()
         brand = (self.brand or "").strip()
@@ -408,18 +413,16 @@ class ShoppingBrief(BaseModel):
                 # downstream search gets a stable hit.
                 self.product_type = match
         if brand:
-            catalog = _vocab("brands")
-            if catalog and brand not in catalog:
-                match = next(
-                    (b for b in catalog if b.lower() == brand.lower()),
-                    None,
-                )
-                if match is None:
-                    raise ValueError(
-                        f"brand {brand!r} is not in the catalog vocabulary; "
-                        "leave empty or pick an exact catalog value"
-                    )
-                self.brand = match
+            # Brands are NOT gated here. The brief stores the brand as
+            # the user wrote it (or as the LLM normalized it from a
+            # general-knowledge guess). Canonical resolution against the
+            # actual catalog happens at search time via find_brands
+            # (three-tier: exact prefix -> FTS5 -> LIKE fallback). If the
+            # catalog has no matching brand, find_brands returns [] and
+            # search_catalog falls back to BM25 on title text. This avoids
+            # the round-trip cost of the LLM retrying after a hard reject
+            # when the user named a brand the catalog doesn't carry.
+            pass
         return self
 
 

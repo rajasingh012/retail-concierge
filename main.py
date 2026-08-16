@@ -28,22 +28,19 @@ DEFAULT_AUDIT_LOG = Path("./retail_audit.jsonl")
 
 
 def _load_catalog_vocabulary(repository: ABOCatalogRepository) -> dict[str, list[str]]:
-    """Pull the canonical product_type / brand lists for the brief prompt.
+    """Pull the canonical product_type list for the brief prompt.
 
     Bounded by ``min_listings`` to skip singleton product_types from the
-    import (test rows, partial imports). Brand list capped at 200 to keep
-    the prompt section under ~2k tokens; the brief validator still gates
-    every value so off-vocabulary mapping attempts surface as Pydantic
-    rejections.
+    import (test rows, partial imports). Brands are NOT injected — the
+    ABO catalog is dominated by Amazon private-label names that real
+    shoppers do not search by, and DeepSeek already knows common brand
+    names. Brand canonicalization happens at search time via ``find_brands``
+    (FTS5 + LIKE fallback), not at brief-extraction time.
     """
     return {
         "product_types": [
             str(row["product_type"])
             for row in repository.list_product_types(min_listings=5)
-        ],
-        "brands": [
-            str(row["brand"])
-            for row in repository.list_brands(limit=200, min_listings=1)
         ],
     }
 

@@ -17,12 +17,16 @@ pattern for Microsoft Agent Framework (MAF):
       per-session, state-dependent content (the user's name/age).
 
 We use the same shape: the static ``instructions=`` stays a small
-house-rules string, and the canonical ``product_type`` / ``brand``
-lists reach the model via ``SessionContext.extend_instructions``
-on every ``before_run`` call.
+house-rules string, and the canonical ``product_type`` list reaches
+the model via ``SessionContext.extend_instructions`` on every
+``before_run`` call. Brands are NOT injected — the ABO catalog is
+dominated by Amazon private-label names that real shoppers do not
+search by, and DeepSeek already knows common brand names. Brand
+canonicalization happens at search time via ``find_brands``
+(FTS5 + LIKE fallback).
 
-Pydantic still enforces the same vocabulary on the way in
-(``domain.recommendation.set_catalog_vocabulary`` /
+Pydantic still enforces the same product_type vocabulary on the way
+in (``domain.recommendation.set_catalog_vocabulary`` /
 ``ShoppingBrief._gate_against_catalog_vocabulary``). The prompt
 injection is a HINT to the LLM, the validator is the GATE. They
 share the same catalog vocabulary list at process-boot time.
@@ -38,7 +42,7 @@ CATALOG_VOCAB_SOURCE_ID = "catalog_vocabulary"
 
 
 class CatalogVocabularyProvider(ContextProvider):
-    """Per-invocation injection of canonical ``product_type`` and ``brand``.
+    """Per-invocation injection of canonical ``product_type``.
 
     Subclasses MAF's ``ContextProvider`` and overrides ``before_run``.
     On every model call it formats the configured catalog vocabulary
@@ -59,27 +63,19 @@ class CatalogVocabularyProvider(ContextProvider):
         self,
         *,
         product_types: list[str],
-        brands: list[str],
     ) -> None:
         super().__init__(source_id=CATALOG_VOCAB_SOURCE_ID)
         # Filter empty / whitespace-only entries so a half-loaded
-        # catalog (e.g. importer run that hasn't populated brands yet)
+        # catalog (e.g. importer run that hasn't populated types yet)
         # produces a clean provider that doesn't churn empty strings
         # into the prompt.
         self._product_types = [
             str(t) for t in product_types if t and str(t).strip()
         ]
-        self._brands = [
-            str(b) for b in brands if b and str(b).strip()
-        ]
 
     @property
     def product_types(self) -> list[str]:
         return list(self._product_types)
-
-    @property
-    def brands(self) -> list[str]:
-        return list(self._brands)
 
     def format_body(self) -> str:
         """Render the vocabulary as the model will see it.
@@ -90,10 +86,7 @@ class CatalogVocabularyProvider(ContextProvider):
         types_section = _format_section(
             "CATALOG_PRODUCT_TYPES", self._product_types
         )
-        brands_section = _format_section(
-            "CATALOG_BRANDS", self._brands
-        )
-        return f"Catalog vocabulary:\n{types_section}\n{brands_section}"
+        return f"Catalog vocabulary:\n{types_section}"
 
     async def before_run(
         self,
@@ -137,6 +130,5 @@ def body_has_content(body: str) -> bool:
         return False
     placeholders = (
         "CATALOG_PRODUCT_TYPES: (catalog has no entries yet)",
-        "CATALOG_BRANDS: (catalog has no entries yet)",
     )
     return not all(p in body for p in placeholders)

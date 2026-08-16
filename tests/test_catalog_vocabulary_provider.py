@@ -72,15 +72,19 @@ def test_source_id_is_stable_source_attribution():
     upstream ``samples/.../simple_context_provider.py`` convention.
     """
     assert CATALOG_VOCAB_SOURCE_ID == "catalog_vocabulary"
-    provider = CatalogVocabularyProvider(product_types=[], brands=[])
+    provider = CatalogVocabularyProvider(product_types=[])
     assert provider.source_id == CATALOG_VOCAB_SOURCE_ID
 
 
 def test_before_run_injects_vocabulary_via_extend_instructions():
-    """Happy path: vocabulary reaches the model via the MAF pipeline."""
+    """Happy path: vocabulary reaches the model via the MAF pipeline.
+
+    Brands are not injected anymore — only the product_types section is
+    in the body. Brand canonicalization happens at search time via the
+    find_brands tool.
+    """
     provider = CatalogVocabularyProvider(
         product_types=["chair", "sofa"],
-        brands=["IKEA", "Herman Miller"],
     )
 
     ctx = _run_before_run(provider)
@@ -88,24 +92,23 @@ def test_before_run_injects_vocabulary_via_extend_instructions():
     assert len(ctx.calls) == 1, "before_run should emit exactly one extension"
     source_id, body = ctx.calls[0]
     assert source_id == CATALOG_VOCAB_SOURCE_ID
-    # The body must contain both section labels and the terms.
+    # The body must contain the product_types section labels and the terms.
     assert "CATALOG_PRODUCT_TYPES:" in body
     assert "chair" in body
     assert "sofa" in body
-    assert "CATALOG_BRANDS:" in body
-    assert "IKEA" in body
-    assert "Herman Miller" in body
+    # Brands are no longer injected — defer to find_brands at search time.
+    assert "CATALOG_BRANDS:" not in body
 
 
 def test_before_run_skips_injection_when_vocabulary_is_empty():
     """No entries -> don't append empty placeholder sections."""
-    provider = CatalogVocabularyProvider(product_types=[], brands=[])
+    provider = CatalogVocabularyProvider(product_types=[])
 
     ctx = _run_before_run(provider)
 
     assert ctx.calls == [], (
-        "before_run must be a no-op when neither product_types nor "
-        "brands have any real entries"
+        "before_run must be a no-op when the product_types list has "
+        "no real entries"
     )
 
 
@@ -114,18 +117,17 @@ def test_format_body_uses_placeholder_when_section_is_empty():
     ``body_has_content`` flags the whole body as no-op so the provider
     skips emission. Two layers of defense: predictable format for
     debugging, predictable skip for the model."""
-    provider = CatalogVocabularyProvider(product_types=[], brands=[])
+    provider = CatalogVocabularyProvider(product_types=[])
 
     body = provider.format_body()
     assert "CATALOG_PRODUCT_TYPES: (catalog has no entries yet)" in body
-    assert "CATALOG_BRANDS: (catalog has no entries yet)" in body
     assert body_has_content(body) is False
 
 
 def test_format_body_has_content_when_any_section_has_entries():
     """One real section is enough — the model gets the hint."""
     provider = CatalogVocabularyProvider(
-        product_types=["chair"], brands=[]
+        product_types=["chair"],
     )
     body = provider.format_body()
     assert body_has_content(body) is True
@@ -135,10 +137,8 @@ def test_provider_filters_blank_entries():
     """Blank strings and empty list entries are dropped at construction time."""
     provider = CatalogVocabularyProvider(
         product_types=["chair", "", "  ", "sofa"],
-        brands=["IKEA", "", "  ", "Herman Miller"],
     )
     assert provider.product_types == ["chair", "sofa"]
-    assert provider.brands == ["IKEA", "Herman Miller"]
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +156,6 @@ def test_build_shopping_agent_no_longer_bakes_catalog_labels_into_instructions()
 
     catalog_vocab = {
         "product_types": ["chair", "sofa", "desk"],
-        "brands": ["IKEA", "Herman Miller", "Steelcase"],
     }
     agent = build_shopping_agent(
         client=MagicMock(name="client"),
@@ -173,9 +172,11 @@ def test_build_shopping_agent_no_longer_bakes_catalog_labels_into_instructions()
         "Static instructions must not contain catalog labels — the "
         "ContextProvider is responsible for that injection now."
     )
-    assert "CATALOG_BRANDS:" not in instructions, (
-        "Same regression guard for the brands section."
-    )
+    # Regression guard: CATALOG_BRANDS section must not reappear in
+    # the static prompt even if a future caller passes brands in the
+    # vocabulary dict (the constructor would ignore it; we want the
+    # test to fail loudly if someone tries to revive the injection).
+    assert "CATALOG_BRANDS:" not in instructions
 
 
 def test_build_shopping_agent_registers_a_context_provider():
@@ -190,7 +191,6 @@ def test_build_shopping_agent_registers_a_context_provider():
         catalog_tools=[],
         catalog_vocabulary={
             "product_types": ["chair"],
-            "brands": ["IKEA"],
         },
     )
 
