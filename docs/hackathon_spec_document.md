@@ -63,7 +63,7 @@ Architecture boundary: the app, catalog, and source live on the developer laptop
 | **Reasoning & planning** | Clarification gate: the agent asks one concise question when constraints conflict; otherwise extracts the brief and plans the tool sequence |
 | **Tool use** | 5 tools (extract_brief, find_product_types, find_brands, search_catalog, finalize_recommendations) with Pydantic schemas |
 | **Memory** | MAF `AgentSession` persists across turns; refinement chips continue the same session |
-| **RAG** | SQLite FTS5 retrieval over 145K products; the agent grounds every claim in catalog evidence (provenance tracker) |
+| **RAG** | SQLite FTS5 retrieval over 145K products; the agent grounds every claim in catalog evidence via per-shopper `ctx.session.state` provenance (invented IDs are dropped) |
 | **Deterministic finalization** | Application code — not the LLM — screens exact-vs-accessory and ranks (no hallucinated eligibility) |
 | **Audit** | Hash-chained JSONL audit log; `scripts/audit_verify.py` verifies truncation/reorder/tampering without producer code |
 

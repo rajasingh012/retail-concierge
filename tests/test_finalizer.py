@@ -444,7 +444,7 @@ def test_enforce_drops_provenance_violations_and_runs_guards():
         "ranked": [
             {"rank": 1, "item_id": "A1", "title_en": "Test A1",
              "brand_en": "", "product_type": "", "product_url": ""},
-            # A2 is unknown to the tracker — must be dropped.
+            # A2 is unknown to the finalizer's seen set — must be dropped.
             {"rank": 2, "item_id": "A2", "title_en": "Test A2",
              "brand_en": "", "product_type": "", "product_url": ""},
         ],
