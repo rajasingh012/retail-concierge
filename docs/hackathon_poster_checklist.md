@@ -12,7 +12,7 @@
 | # | Deliverable | Status | File/Link |
 |---|------------|--------|-----------|
 | 1 | Project Specification Document | ✅ | `docs/hackathon_spec_document.md` |
-| 2 | Project Source Code | ✅ | https://github.com/rajasingh012/retail-concierge (AGPL-3.0, public) |
+| 2 | Project Source Code | ✅ | https://github.com/rajasingh012/retail-concierge (Apache-2.0, public) |
 | 3 | Demo Video | 🎬 In production | per `docs/demo_video_script.md` (3:40 target, real terminal) |
 | 5 | Published model (extra evidence) | ✅ | https://huggingface.co/rajasingh012/gemma-4-12b-it-quark-w8a8-int8 — first AMD Quark W8A8 INT8 of Gemma 4 12B, public |
 | 4 | PPT / Poster | ✅ Below | Key slides in this document |

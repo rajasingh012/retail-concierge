@@ -5,6 +5,8 @@ import asyncio
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from agent_framework import AgentResponse
 
 from domain.recommendation import (
@@ -92,7 +94,12 @@ def _show_recommendation(recommendation) -> tuple[RefinementChip, ...]:
         print("No supported catalog matches were found.")
 
     if recommendation.recommendation:
-        print(f"\n{recommendation.recommendation}")
+        # Render intro bullets as text. recommendation is a list of
+        # IntroBullet Pydantic objects (per domain/recommendation.py);
+        # printing the list directly would emit the repr, not the bullet text.
+        print("\n" + "\n".join(
+            f"- {bullet.text}" for bullet in recommendation.recommendation
+        ))
     if recommendation.assumptions:
         print("\nAssumptions:")
         for assumption in recommendation.assumptions:
@@ -101,8 +108,8 @@ def _show_recommendation(recommendation) -> tuple[RefinementChip, ...]:
         print("\nEvidence notes:")
         for note in recommendation.notes:
             print(f"- {note}")
-    if recommendation.dataset_notice:
-        print(f"\n{recommendation.dataset_notice}")
+    if recommendation.catalog_notice:
+        print(f"\n{recommendation.catalog_notice}")
 
     chips = recommendation.refinement_chips[:MAX_REFINEMENT_CHIPS]
     if chips:
@@ -232,6 +239,7 @@ async def run_chat() -> None:
 
 
 def main() -> None:
+    load_dotenv()
     asyncio.run(run_chat())
 
 

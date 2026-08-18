@@ -21,7 +21,8 @@ graph LR
   use_cases --> infra
   use_cases --> domain
   infra --> domain
-  bench --> main
+  bench --> use_cases
+  bench --> infra
   scripts -.imports.-> infra
 ```
 
@@ -32,24 +33,24 @@ The agent receives Microsoft Agent Framework's `OpenAIChatCompletionClient`; vLL
 RetailConcierge is one MAF `Agent` responsible for the complete user conversation:
 
 - call `extract_brief` first to produce a structured brief via LLM tool calling
-- ask only blocking clarification questions (capped at 2 per turn by the brief tool)
-- call `find_product_types` and `find_brands` to canonicalize names against the catalog
+- ask only blocking clarification questions when compatibility, must-have relaxations, or fundamentally different product interpretations are at stake
+- call `find_brands` (and `find_product_types` when a type filter would materially narrow the search) to canonicalize names against the catalog
 - call `search_catalog` to retrieve BM25 candidates, writing observed `item_id`s into `ctx.session.state`
 - classify every retrieved item as `exact_product`, `accessory`, `unrelated`, or `uncertain`
-- call `finalize_recommendations` to drop anything not seen by `search_catalog` this session, keep only `exact_product`, apply deterministic weighted ranking with the intent-match tie-breaker, and emit the typed `IntroBullet` recommendation list
-- after `finalize_recommendations`, narrate supported picks and evidence gaps; the bullet list itself is the ground truth
+- call `finalize_recommendations` to drop anything not seen by `search_catalog` this session, keep only `exact_product`, apply deterministic weighted ranking with the intent-match tie-breaker, and return a typed candidate list (the `IntroBullet` recommendation list is built by the finalizer guard that runs after the tool returns)
+- after `finalize_recommendations`, narrate supported picks and evidence gaps; the finalizer's bullet list is what the shopper sees, not the model's first-pass draft
 
-The five MAF tools, in call order:
+The five MAF tools, in the order the system prompt asks for:
 
 | Tool | What it does |
 |---|---|
 | `extract_brief` | LLM fills a `ShoppingBrief` Pydantic model; tool body validates (typed currency / dimension / quantity conversion, vocabulary gate). Writes `target_use` and `must_have` into `ctx.session.state`. |
 | `find_product_types` | LIKE-match against the `product_type` column, ordered by listing count. |
 | `find_brands` | Three-tier resolution: exact prefix → FTS5 → LIKE fallback. Handles misspellings and case. |
-| `search_catalog` | BM25 via FTS5, up to 50 candidates with optional type / brand / dimension filters. Writes returned `item_id` values into `ctx.session.state['seen_item_ids']`. |
-| `finalize_recommendations` | Reads `seen_item_ids` / `target_use` / `must_have` from `ctx.session.state`. Drops candidates whose `item_id` was not seen by `search_catalog` in this session, keeps only `exact_product`, applies deterministic multi-field ranking with the intent-match tie-breaker, and returns the typed result with its `IntroBullet` recommendation list. |
+| `search_catalog` | BM25 via FTS5, up to 50 candidates with optional product-type and max-dimension filters (no brand filter parameter; brand resolution happens in `find_brands`). Writes returned `item_id` values into `ctx.session.state['seen_item_ids']`. |
+| `finalize_recommendations` | Reads `seen_item_ids` / `target_use` / `must_have` from `ctx.session.state`. Drops candidates whose `item_id` was not seen by `search_catalog` in this session, keeps only `exact_product`, applies deterministic multi-field ranking with the intent-match tie-breaker, and returns a `dict` payload. The `IntroBullet` recommendation list is built by the finalizer guard (`enforce_finalized_recommendation`) that runs after the tool returns. |
 
-Per-shopper memory lives entirely on the MAF `AgentSession` object — `seen_item_ids`, `target_use`, `must_have`. The CLI creates one `AgentSession` and reuses it across turns; Streamlit's "New Session" button creates a fresh one. There is no process-wide or closure-captured state.
+Per-shopper memory lives on the MAF `AgentSession` object — `seen_item_ids`, `target_use`, `must_have`. The CLI creates one `AgentSession` and reuses it across turns; Streamlit's "New Session" button creates a fresh one. Tool-level state (catalog query cache, hits/misses) is module-level in `infrastructure/agent_tools.py` and shared across sessions — it is not per-shopper.
 
 ## Conversation
 
@@ -57,23 +58,25 @@ Per-shopper memory lives entirely on the MAF `AgentSession` object — `seen_ite
 flowchart TD
   user(["user message / refinement"])
   brief["extract_brief<br/>(LLM fills ShoppingBrief<br/>+ writes target_use, must_have to session.state)"]
-  qcheck{brief complete?}
-  question["concise question<br/>max 2 per turn"]
+  qcheck{blocking ambiguity?}
+  question["concise question<br/>(only when must-have can't be silently relaxed)"]
   resolve["find_product_types / find_brands<br/>(canonicalize against catalog)"]
   search["search_catalog<br/>(BM25 + filters)<br/>writes item_ids to session.state"]
   classify["classify each item<br/>exact_product / accessory /<br/>unrelated / uncertain"]
-  finalize["finalize_recommendations<br/>• provenance gate (drop ∉ session.state)<br/>• deterministic ranking<br/>• intent-match tie-breaker<br/>• IntroBullet schema validation<br/>• audit-log entry"]
+  finalize["finalize_recommendations<br/>• provenance gate (drop ∉ session.state)<br/>• deterministic ranking<br/>• intent-match tie-breaker<br/>• audit-log entry"]
+  finalize2["enforce_finalized_recommendation<br/>• IntroBullet schema validation<br/>• phantom-item bullet strip<br/>• dataset_disclaimer append<br/>• CATALOG_NOTICE overwrite<br/>(runs after the tool returns)"]
   out["protected ranked products<br/>+ typed IntroBullet list<br/>+ evidence notes<br/>+ assumptions<br/>+ refinement chips<br/>+ audit-log entry"]
 
   user --> brief
   brief --> qcheck
-  qcheck -- "complete=false" --> question
-  qcheck -- "complete=true" --> resolve
+  qcheck -- "yes" --> question
+  qcheck -- "no (Results first)" --> resolve
   question --> user
   resolve --> search
   search --> classify
   classify --> finalize
-  finalize --> out
+  finalize --> finalize2
+  finalize2 --> out
   out --> user
 ```
 
@@ -83,17 +86,17 @@ The default path shows products without interruption. Compatibility uncertainty,
 
 The bullet list the shopper sees is a typed list of `IntroBullet` (Pydantic model in `domain/recommendation.py`), not free-form prose. Two closed enums lock the schema:
 
-- `subject`: one of `brief`, `item`, `catalog`, `dataset`.
-- `claim_kind`: a closed set bounded by what the catalog can evidence
-  (`price`, `stock`, `shipping`, `rating`, `warranty`, `discount`) plus
-  structural kinds (`intent_match`, `dataset_disclaimer`, `none`, …).
-  No ad-hoc claim category can be emitted.
+- `subject`: one of `item`, `brief`, `assumptions`, `catalog_notice`.
+- `claim_kind`: one of `color`, `material`, `dimension`, `brand`, `product_type`,
+  `intent_match`, `dataset_disclaimer`, `none`. Catalog-absent fact categories
+  (`price`, `stock`, `shipping`, `rating`, `warranty`, `discount`) have no slot
+  in the enum and are rejected at validation time. No ad-hoc claim category can be emitted.
 
 A pair of cross-field validators enforces invariants:
 
 - `subject='item'` must carry an `item_id`; `subject='brief'` must not.
 - `claim_kind='dataset_disclaimer'` must be about the dataset itself.
-- `claim_kind='intent_match'` must reference `target_use` or `must_have`.
+- `claim_kind='intent_match'` pairs only with `subject='brief'` (the (subject, claim_kind) pair is enforced, not a reference to specific brief fields).
 
 On top of validation, the finalizer applies three runtime guards before the response is returned:
 
@@ -103,14 +106,15 @@ On top of validation, the finalizer applies three runtime guards before the resp
    in `search_catalog` output — are stripped. The provenance gate in
    `finalize_recommendations` already keeps them out of the ranked
    list; this guard keeps them out of the prose bullets too.
-3. Any `CATALOG_NOTICE` overwrite is re-applied after the guard pass,
-   so a finalizer cannot quietly remove the catalog-disclosure line.
+3. `catalog_notice` is overwritten with `CATALOG_NOTICE` (the catalog-truth
+   constant), so the model cannot paraphrase the disclaimer into a "live
+   availability" claim.
 
 Legacy string bullets are coerced into `IntroBullet` via a `BeforeValidator`, so older tool payloads still validate without code changes elsewhere. Implementation: `domain/recommendation.py` (schema + validators), `use_cases/shopping_agent.py` (runtime guards).
 
 ### Intent-match tie-breaker
 
-`screen_and_rank_candidates` ranks by a deterministic weighted score (price / rating / stock / brand / type match). When two candidates tie on that primary score, `_target_use_match_score` supplies a secondary key that prefers the candidate whose `target_use` overlaps the shopper's brief. The primary score is never overridden — the tie-breaker only resolves draws, so the existing ranking contracts stay intact.
+`screen_and_rank_candidates` ranks by a deterministic weighted score (50% FTS5 retrieval relevance + 15% bullet coverage + 15% material presence + 10% brand presence + 10% dimension evidence). The catalog has no price, rating, or stock data, so those signals are not in the ranking. When two candidates tie on that primary score, `_target_use_match_score` supplies a secondary key that prefers the candidate whose `target_use` overlaps the shopper's brief. The primary score is never overridden — the tie-breaker only resolves draws, so the existing ranking contracts stay intact.
 
 ## Catalog
 
@@ -120,7 +124,7 @@ The Amazon Berkeley Objects (ABO) NDJSON dataset is imported once into `retail_c
 erDiagram
   LISTINGS ||--o{ LISTING_TEXT_VALUES : "has"
   LISTINGS ||--o{ LISTING_DIMENSIONS : "has"
-  LISTINGS ||--o| LISTING_FTS : "indexed by"
+  LISTINGS ||--|| LISTING_FTS : "indexed by"
 
   LISTINGS {
     INTEGER id PK
@@ -144,6 +148,7 @@ erDiagram
     string  dimension
     real    value
     string  unit
+    INTEGER is_normalized
   }
   LISTING_FTS {
     string    title_en
@@ -162,7 +167,7 @@ The catalog vocabulary itself is injected per turn through a `CatalogVocabularyP
 
 ## Session boundary
 
-The CLI creates one `AgentSession` and reuses it until the user exits. MAF stores the turn history in that session, allowing a clarification answer or refinement to continue the same conversation. Between turns of the same conversation, `seen_item_ids` / `target_use` / `must_have` are reset on `ctx.session.state` so each new user message starts with a clean provenance scope. The CLI does not persist sessions across process restarts. Streamlit uses the same `AgentSession` object per active chat; "New Session" creates a fresh one.
+The CLI creates one `AgentSession` and reuses it until the user exits. MAF stores the turn history in that session, allowing a clarification answer or refinement to continue the same conversation. Between turns of the same conversation, `seen_item_ids`, `target_use`, and `must_have` are popped on `ctx.session.state` so each new user message starts with a clean provenance scope and the tie-breaker does not read stale intent. The next `extract_brief` call rewrites `target_use` / `must_have` from the new user message. The CLI does not persist sessions across process restarts. Streamlit uses the same `AgentSession` object per active chat; "New Session" creates a fresh one.
 
 ## Benchmark
 

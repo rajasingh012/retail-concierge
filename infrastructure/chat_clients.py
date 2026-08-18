@@ -8,12 +8,14 @@ Provider presets:
     vllm     → AMD Developer Cloud MI300X, default base http://localhost:8000/v1
     deepseek → cloud API, https://api.deepseek.com/v1
 
-Provider-specific request fields that aren't part of the OpenAI Chat
-Completions typed signature (e.g. DeepSeek's ``thinking``) are passed via
-the OpenAI SDK's documented ``extra_body`` kwarg. MAF forwards
-``default_options`` through to ``chat.completions.create(**kwargs)``,
-so wrapping the fields in ``extra_body`` is the MAF-recommended way —
-no SDK patching required (verified against MAF 1.14.0).
+PROVIDERS[provider] = (base_url, env_key, extras_dict). The agent builder
+merges `extras_dict` into `Agent(default_options=...)` blindly; the agent
+never names a provider, so adding a new provider = one tuple.
+
+`extra_body` is the OpenAI SDK's typed escape hatch for fields outside the
+Chat Completions spec (DeepSeek `thinking`, etc.). MAF 1.14.0+ forwards it
+through to `chat.completions.create(**kwargs)` unchanged — no app-side
+routing needed.
 
 Adding a provider = one entry in PROVIDERS below.
 """
@@ -25,12 +27,8 @@ from typing import Any
 from agent_framework.openai import OpenAIChatCompletionClient
 
 
-# ---------- provider registry ----------
-# Each entry: (default_base_url, env_var_for_api_key, per-request default_options).
-# Merge these into the Agent's `default_options` to attach provider-specific
-# fields. Fields the OpenAI SDK doesn't know (``thinking``, custom sampling
-# params, etc.) must live inside ``extra_body`` — that's the SDK's typed
-# escape hatch for unrecognized JSON body fields.
+# Each entry: (default_base_url, env_var_for_api_key, per-request
+# extras_dict). The agent builder merges extras_dict into `default_options`.
 PROVIDERS: dict[str, tuple[str, str | None, dict[str, Any]]] = {
     "vllm": ("http://localhost:8000/v1", None, {}),
     "deepseek": (
@@ -53,13 +51,7 @@ PROVIDERS: dict[str, tuple[str, str | None, dict[str, Any]]] = {
 
 
 def provider_extras(provider: str) -> dict[str, Any]:
-    """Return the per-provider extras dict for merging into ``default_options``.
-
-    Read by callers (e.g. ``use_cases.shopping_agent``) so the agent's
-    ``default_options`` can include provider-specific fields without
-    hard-coding provider names. Wrap any non-OpenAI-standard fields in
-    ``extra_body`` so the OpenAI SDK passes them through to the request body.
-    """
+    """Return ``PROVIDERS[provider][2]`` for merging into ``default_options``."""
     try:
         _, _, extras = PROVIDERS[provider]
     except KeyError as e:

@@ -143,13 +143,13 @@ Final response:
     "assumptions": ["..."],
     "notes": ["..."],
     "recommendation": [
-      {"subject": "<one of: item|brief|assumptions|dataset_notice>",
+      {"subject": "<one of: item|brief|assumptions|catalog_notice>",
        "claim_kind": "<one of: color|material|dimension|brand|product_type|intent_match|dataset_disclaimer|none>",
        "item_id": "<required when subject=item, omitted otherwise>",
        "text": "One sentence the user will read."}
     ],
     "refinement_chips": [{"label": "...", "instruction": "..."}],
-    "dataset_notice": "This is an offline product catalog snapshot..."
+    "catalog_notice": "This is an offline product catalog snapshot..."
   }
 - At most 5 entries in "ranked", 5 entries in "recommendation", and 4
   entries in "refinement_chips". Never invent specifications, prices,
@@ -159,17 +159,17 @@ Final response:
   rejects any value outside those enums. "subject=item" requires a non-empty
   "item_id" that matches one of the ranked entries; other subjects must omit
   "item_id". "claim_kind=dataset_disclaimer" only pairs with "subject=
-  dataset_notice". "claim_kind=intent_match" only pairs with "subject=brief".
+  catalog_notice". "claim_kind=intent_match" only pairs with "subject=brief".
 - The schema has no slot for "stock", "price", "shipping", "rating",
   "warranty", or "discount" — if you try to assert any of those, the bullet
   will be rejected. Use "claim_kind=none" for transitions, framing, or
   any sentence that does not make a catalog claim. The catalog-scope
-  disclaimer is one bullet with subject=dataset_notice, claim_kind=
-  dataset_disclaimer, text=the dataset_notice string.
+  disclaimer is one bullet with subject=catalog_notice, claim_kind=
+  dataset_disclaimer, text=the catalog_notice string.
 - You may emit at most one "item" bullet per ranked item, and zero
   "item" bullets if the intro has no per-item commentary. Most turns
   use 2-4 bullets total: one brief framing, zero-or-more per-item
-  commentary, and the dataset_notice bullet.
+  commentary, and the catalog_notice bullet.
 """
 
 
@@ -494,7 +494,7 @@ CATALOG_NOTICE = (
 )
 
 
-def enforce_dataset_notice(_notice: str | None) -> str:
+def enforce_catalog_notice(_notice: str | None) -> str:
     """Return the catalog-truth disclaimer regardless of what the model wrote."""
     return CATALOG_NOTICE
 
@@ -515,7 +515,7 @@ def enforce_finalized_recommendation(
       surviving ranked item.
     * Guarantee the dataset_disclaimer bullet is present; synthesize one
       when the model omitted it.
-    * Overwrite ``dataset_notice`` with the catalog-truth constant so the
+    * Overwrite ``catalog_notice`` with the catalog-truth constant so the
       disclaimer cannot be paraphrased.
     """
     if finalized is None:
@@ -579,13 +579,13 @@ def enforce_finalized_recommendation(
     # present; if the model omitted it, append a synthetic one so the user
     # always sees the catalog-scope reminder.
     has_disclaimer = any(
-        b.subject == "dataset_notice" and b.claim_kind == "dataset_disclaimer"
+        b.subject == "catalog_notice" and b.claim_kind == "dataset_disclaimer"
         for b in intro_bullets
     )
     if not has_disclaimer:
         intro_bullets.append(
             IntroBullet(
-                subject="dataset_notice",
+                subject="catalog_notice",
                 claim_kind="dataset_disclaimer",
                 text=CATALOG_NOTICE,
             )
@@ -615,8 +615,8 @@ def enforce_finalized_recommendation(
     intro_bullets = intro_bullets[:MAX_INTRO_BULLETS]
 
     # Overwrite the dataset notice with the catalog-truth constant.
-    notice = enforce_dataset_notice(
-        recommendation.get("dataset_notice") if isinstance(recommendation, dict) else recommendation.dataset_notice
+    notice = enforce_catalog_notice(
+        recommendation.get("catalog_notice") if isinstance(recommendation, dict) else recommendation.catalog_notice
     )
 
     if isinstance(recommendation, RecommendationResponse):
@@ -625,7 +625,7 @@ def enforce_finalized_recommendation(
                 "ranked": ranked,
                 "recommendation": intro_bullets,
                 "notes": existing_notes,
-                "dataset_notice": notice,
+                "catalog_notice": notice,
             }
         )
     return RecommendationResponse(
@@ -635,7 +635,7 @@ def enforce_finalized_recommendation(
         notes=existing_notes,
         recommendation=intro_bullets,
         refinement_chips=_parse_refinement_chips(recommendation.get("refinement_chips", [])),
-        dataset_notice=notice,
+        catalog_notice=notice,
     )
 
 

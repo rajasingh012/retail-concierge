@@ -3,11 +3,11 @@
 Covers:
 
 * :class:`IntroBullet` schema validation — closed (subject, claim_kind)
-  enums, item_id ↔ subject coupling, dataset_disclaimer ↔ dataset_notice
+  enums, item_id ↔ subject coupling, dataset_disclaimer ↔ catalog_notice
   coupling, intent_match ↔ brief coupling. The model cannot emit
   catalog-absent facts (price, stock, rating, shipping, warranty,
   discount) because the schema has no slot for them.
-* Dataset-notice overwrite — the finalizer's ``enforce_dataset_notice``
+* Catalog-notice overwrite — the finalizer's ``enforce_catalog_notice``
   returns the catalog-truth constant regardless of what the model wrote.
 * Tie-breaker behavior in :func:`screen_and_rank_candidates` — candidates
   with identical primary scores are ordered by intent-match.
@@ -27,7 +27,7 @@ from domain.recommendation import (
 from use_cases.ranking import screen_and_rank_candidates
 from use_cases.shopping_agent import (
     CATALOG_NOTICE,
-    enforce_dataset_notice,
+    enforce_catalog_notice,
     enforce_finalized_recommendation,
 )
 
@@ -58,9 +58,9 @@ def test_intro_bullet_accepts_brief_no_item_id():
 
 
 def test_intro_bullet_accepts_dataset_disclaimer_pair():
-    """The dataset_disclaimer claim_kind pairs with the dataset_notice subject."""
+    """The dataset_disclaimer claim_kind pairs with the catalog_notice subject."""
     bullet = IntroBullet(
-        subject="dataset_notice",
+        subject="catalog_notice",
         claim_kind="dataset_disclaimer",
         text=CATALOG_NOTICE,
     )
@@ -82,7 +82,7 @@ def test_intro_bullet_rejects_item_id_on_non_item_subject():
 
 
 def test_intro_bullet_rejects_dataset_disclaimer_with_wrong_subject():
-    """dataset_disclaimer is only valid with subject=dataset_notice."""
+    """dataset_disclaimer is only valid with subject=catalog_notice."""
     with pytest.raises(ValueError, match="dataset_disclaimer"):
         IntroBullet(
             subject="brief", claim_kind="dataset_disclaimer", text="x"
@@ -163,7 +163,7 @@ def test_recommendation_field_accepts_structured_list():
              "text": "Good for open-plan office use."},
             {"subject": "item", "claim_kind": "color", "item_id": "A1",
              "text": "Black mesh back."},
-            {"subject": "dataset_notice", "claim_kind": "dataset_disclaimer",
+            {"subject": "catalog_notice", "claim_kind": "dataset_disclaimer",
              "text": "Offline catalog snapshot."},
         ],
         "assumptions": [],
@@ -197,15 +197,15 @@ def test_recommendation_field_rejects_invalid_bullet_in_list():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# enforce_dataset_notice
+# enforce_catalog_notice
 # ─────────────────────────────────────────────────────────────────────
 
 
-def test_dataset_notice_constant_is_returned():
+def test_catalog_notice_constant_is_returned():
     """Whatever the model wrote, the guard returns the catalog-truth constant."""
-    assert enforce_dataset_notice("live catalog with prices") == CATALOG_NOTICE
-    assert enforce_dataset_notice("") == CATALOG_NOTICE
-    assert enforce_dataset_notice(None) == CATALOG_NOTICE  # type: ignore[arg-type]
+    assert enforce_catalog_notice("live catalog with prices") == CATALOG_NOTICE
+    assert enforce_catalog_notice("") == CATALOG_NOTICE
+    assert enforce_catalog_notice(None) == CATALOG_NOTICE  # type: ignore[arg-type]
 
 
 def test_catalog_notice_mentions_offline_no_prices():
@@ -347,7 +347,7 @@ def test_enforce_appends_synthetic_dataset_disclaimer_bullet():
     finalized = [_candidate_with_facts("A1")]
     result = enforce_finalized_recommendation(recommendation, finalized)
     assert any(
-        b.subject == "dataset_notice" and b.claim_kind == "dataset_disclaimer"
+        b.subject == "catalog_notice" and b.claim_kind == "dataset_disclaimer"
         for b in result.recommendation
     )
 
@@ -362,7 +362,7 @@ def test_enforce_keeps_model_dataset_disclaimer_bullet_verbatim():
              "brand_en": "", "product_type": "", "product_url": ""},
         ],
         "recommendation": [
-            {"subject": "dataset_notice", "claim_kind": "dataset_disclaimer",
+            {"subject": "catalog_notice", "claim_kind": "dataset_disclaimer",
              "text": "offline catalog snapshot"},
         ],
         "assumptions": [],
@@ -372,7 +372,7 @@ def test_enforce_keeps_model_dataset_disclaimer_bullet_verbatim():
     result = enforce_finalized_recommendation(recommendation, finalized)
     disclaimer_bullets = [
         b for b in result.recommendation
-        if b.subject == "dataset_notice" and b.claim_kind == "dataset_disclaimer"
+        if b.subject == "catalog_notice" and b.claim_kind == "dataset_disclaimer"
     ]
     assert len(disclaimer_bullets) == 1
     assert disclaimer_bullets[0].text == "offline catalog snapshot"
@@ -458,13 +458,13 @@ def test_enforce_drops_provenance_violations_and_runs_guards():
     assert result.ranked[0].item_id == "A1"
     # A disclaimer bullet was synthesized.
     assert any(
-        b.subject == "dataset_notice" and b.claim_kind == "dataset_disclaimer"
+        b.subject == "catalog_notice" and b.claim_kind == "dataset_disclaimer"
         for b in result.recommendation
     )
 
 
-def test_enforce_overwrites_dataset_notice():
-    """The dataset_notice field on the response is overwritten with the
+def test_enforce_overwrites_catalog_notice():
+    """The catalog_notice field on the response is overwritten with the
     catalog-truth constant. The bullet's text mirrors the same constant."""
     recommendation = RecommendationResponse.model_validate({
         "kind": "recommendations",
@@ -477,11 +477,11 @@ def test_enforce_overwrites_dataset_notice():
         ],
         "assumptions": [],
         "notes": [],
-        "dataset_notice": "live catalog with prices and stock",
+        "catalog_notice": "live catalog with prices and stock",
     })
     finalized = [_candidate_with_facts("A1")]
     result = enforce_finalized_recommendation(recommendation, finalized)
-    assert result.dataset_notice == CATALOG_NOTICE
+    assert result.catalog_notice == CATALOG_NOTICE
 
 
 def test_enforce_accepts_legacy_string_recommendation():

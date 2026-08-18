@@ -207,7 +207,7 @@ def test_session_keeps_clarification_answer_in_one_conversation() -> None:
                             "ranked": [],
                             "notes": ["No supported catalog match"],
                             "refinement_chips": [],
-                            "dataset_notice": "snapshot",
+                            "catalog_notice": "snapshot",
                         }
                     )
                 },

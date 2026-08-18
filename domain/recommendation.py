@@ -28,7 +28,7 @@ INTRO_SUBJECTS = (
     "item",          # This bullet refers to one specific ranked item. item_id is required.
     "brief",         # This bullet refers to the user's stated intent.
     "assumptions",   # This bullet surfaces a brief assumption.
-    "dataset_notice",  # The catalog-scope disclaimer line.
+    "catalog_notice",  # The catalog-scope disclaimer bullet.
 )
 
 INTRO_CLAIM_KINDS = (
@@ -130,7 +130,7 @@ class IntroBullet(BaseModel):
     """One sentence in the agent's introduction prose.
 
     Each bullet carries a closed ``subject`` enum (item / brief / assumptions /
-    dataset_notice) and a closed ``claim_kind`` enum (color / material /
+    catalog_notice) and a closed ``claim_kind`` enum (color / material /
     dimension / brand / product_type / intent_match / dataset_disclaimer /
     none). Pydantic rejects any value outside the enum, so a model that wants
     to write "in stock" must pick a ``claim_kind``, and no ``claim_kind`` in
@@ -142,12 +142,12 @@ class IntroBullet(BaseModel):
 
     ``item_id`` is required when ``subject == "item"`` and forbidden
     otherwise. ``dataset_disclaimer`` claim_kind is only valid with
-    ``dataset_notice`` subject. ``intent_match`` claim_kind is only valid with
+    ``catalog_notice`` subject. ``intent_match`` claim_kind is only valid with
     ``brief`` subject. These cross-field rules are enforced by
     :meth:`_validate_subject_claim_combo`.
     """
 
-    subject: Literal["item", "brief", "assumptions", "dataset_notice"]
+    subject: Literal["item", "brief", "assumptions", "catalog_notice"]
     claim_kind: Literal[
         "color",
         "material",
@@ -173,10 +173,10 @@ class IntroBullet(BaseModel):
                 f"IntroBullet with subject={self.subject!r} must not carry "
                 "an item_id; item_id is reserved for subject='item'"
             )
-        if self.claim_kind == "dataset_disclaimer" and self.subject != "dataset_notice":
+        if self.claim_kind == "dataset_disclaimer" and self.subject != "catalog_notice":
             raise ValueError(
                 "IntroBullet with claim_kind='dataset_disclaimer' must use "
-                "subject='dataset_notice'"
+                "subject='catalog_notice'"
             )
         if self.claim_kind == "intent_match" and self.subject != "brief":
             raise ValueError(
@@ -268,7 +268,7 @@ class RecommendationResponse(BaseModel):
         default_factory=list,
         max_length=MAX_REFINEMENT_CHIPS,
     )
-    dataset_notice: str = (
+    catalog_notice: str = (
         "This is an offline product catalog snapshot with typed dimensions, "
         "material, color, and brand metadata but no prices, ratings, or "
         "live availability."
