@@ -1,90 +1,57 @@
 """Chat client factory — provider-agnostic LLM access.
 
 Uses Microsoft Agent Framework's `OpenAIChatCompletionClient`, which natively
-speaks the OpenAI Chat Completions wire protocol. All providers (vLLM, DeepSeek,
-DeepSeek) expose this endpoint, so swapping backends is just a `base_url` change.
+speaks the OpenAI Chat Completions wire protocol. All providers (vLLM, DeepSeek)
+expose this endpoint, so swapping backends is just a `base_url` change.
 
 Provider presets:
     vllm     → AMD Developer Cloud MI300X, default base http://localhost:8000/v1
     deepseek → cloud API, https://api.deepseek.com/v1
-    deepseek → cloud API, https://api.deepseek.com/v1
+
+PROVIDERS[provider] = (base_url, env_key, extras_dict). The agent builder
+merges `extras_dict` into `Agent(default_options=...)` blindly; the agent
+never names a provider, so adding a new provider = one tuple.
+
+`extra_body` is the OpenAI SDK's typed escape hatch for fields outside the
+Chat Completions spec (DeepSeek `thinking`, etc.). MAF 1.14.0+ forwards it
+through to `chat.completions.create(**kwargs)` unchanged — no app-side
+routing needed.
 
 Adding a provider = one entry in PROVIDERS below.
 """
 from __future__ import annotations
 
-import inspect
 import os
 from typing import Any
 
 from agent_framework.openai import OpenAIChatCompletionClient
-from openai.resources.chat.completions import AsyncCompletions
-
-_OPENAI_COMPLETIONS_CREATE_KWARGS: frozenset[str] = frozenset(
-    inspect.signature(AsyncCompletions.create).parameters
-)
 
 
-# ---------- provider registry ----------
-# Each entry: (default_base_url, env_var_for_api_key, per-request extras).
-# `extras` are merged into every chat-completion request via the OpenAI SDK's
-# `extra_body` — a documented escape hatch for provider-specific fields that
-# don't exist on the OpenAI type stubs (e.g. ``thinking`` for DeepSeek,
-# custom sampling params on local vLLM builds). Unknown fields on the server
-# side are silently ignored, so a provider-only extra on another provider is a no-op.
+# Each entry: (default_base_url, env_var_for_api_key, per-request
+# extras_dict). The agent builder merges extras_dict into `default_options`.
 PROVIDERS: dict[str, tuple[str, str | None, dict[str, Any]]] = {
-    "vllm":     ("http://localhost:8000/v1", None, {}),
-    "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", {
-        # Disable thinking for contract turns. DeepSeek defaults to thinking
-        # enabled with effort "high". When thinking is enabled and the agent
-        # performs tool calls, `reasoning_content` must be forwarded in every
-        # subsequent turn or the API returns 400. Disabling thinking avoids
-        # this MAF-compatibility issue entirely.
-        "thinking": {"type": "disabled"},
-        "max_completion_tokens": 8192,
-    }),
-
+    "vllm": ("http://localhost:8000/v1", None, {}),
+    "deepseek": (
+        "https://api.deepseek.com/v1",
+        "DEEPSEEK_API_KEY",
+        {
+            "extra_body": {
+                # Disable thinking for contract turns. DeepSeek defaults to
+                # thinking enabled with effort "high". When thinking is on
+                # and the agent performs tool calls, ``reasoning_content``
+                # must be forwarded in every subsequent turn or the API
+                # returns 400. Disabling thinking avoids that MAF-
+                # compatibility issue entirely.
+                "thinking": {"type": "disabled"},
+                "max_completion_tokens": 8192,
+            },
+        },
+    ),
 }
 
 
-def _install_extra_body_routing() -> None:
-    """Route unknown ``default_options`` keys through the OpenAI SDK's
-    ``extra_body`` instead of passing them as typed kwargs.
-
-    MAF forwards every key in ``default_options`` straight to OpenAI SDK's
-    ``chat.completions.create(**kwargs)``. Provider-specific fields
-    (``reasoning_split``, ``thinking``) raise ``TypeError`` on the OpenAI SDK
-    because they aren't part of its typed signature. The OpenAI SDK exposes
-    ``extra_body`` for this case; we collect unrecognised keys and let the
-    SDK merge them into the request JSON. The SDK itself decides what counts
-    as a known kwarg — derived once from its current signature.
-    """
-    original = OpenAIChatCompletionClient._prepare_options
-
-    def wrapped(self, messages, options):
-        prepared = original(self, messages, options)
-        existing_extra = prepared.pop("extra_body", None) or {}
-        for key in list(prepared):
-            if key not in _OPENAI_COMPLETIONS_CREATE_KWARGS and key != "messages":
-                existing_extra[key] = prepared.pop(key)
-        if existing_extra:
-            prepared["extra_body"] = existing_extra
-        return prepared
-
-    OpenAIChatCompletionClient._prepare_options = wrapped
-
-
-_install_extra_body_routing()
-
-
 def provider_extras(provider: str) -> dict[str, Any]:
-    """Return the per-provider extras dict for embedding into request bodies.
-
-    Read by callers (e.g. ``use_cases.shopping_agent``) so the agent's
-    ``default_options`` can include provider-specific fields without
-    hard-coding provider names. Unknown extras on a different provider are
-    forwarded and silently ignored by the server.
-    """
+    """Return ``PROVIDERS[provider][2]`` for merging into ``default_options``."""
     try:
         _, _, extras = PROVIDERS[provider]
     except KeyError as e:

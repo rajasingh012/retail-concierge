@@ -5,6 +5,8 @@ import asyncio
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from agent_framework import AgentResponse
 
 from domain.recommendation import (
@@ -16,7 +18,6 @@ from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ABOCatalogRepository
 from use_cases import build_shopping_agent
 from use_cases.shopping_agent import (
-    CatalogEvidenceTracker,
     enforce_finalized_recommendation,
     finalized_candidates_from_response,
     structured_recommendation_from_response,
@@ -29,22 +30,19 @@ DEFAULT_AUDIT_LOG = Path("./retail_audit.jsonl")
 
 
 def _load_catalog_vocabulary(repository: ABOCatalogRepository) -> dict[str, list[str]]:
-    """Pull the canonical product_type / brand lists for the brief prompt.
+    """Pull the canonical product_type list for the brief prompt.
 
     Bounded by ``min_listings`` to skip singleton product_types from the
-    import (test rows, partial imports). Brand list capped at 200 to keep
-    the prompt section under ~2k tokens; the brief validator still gates
-    every value so off-vocabulary mapping attempts surface as Pydantic
-    rejections.
+    import (test rows, partial imports). Brands are NOT injected — the
+    ABO catalog is dominated by Amazon private-label names that real
+    shoppers do not search by, and DeepSeek already knows common brand
+    names. Brand canonicalization happens at search time via ``find_brands``
+    (FTS5 + LIKE fallback), not at brief-extraction time.
     """
     return {
         "product_types": [
             str(row["product_type"])
             for row in repository.list_product_types(min_listings=5)
-        ],
-        "brands": [
-            str(row["brand"])
-            for row in repository.list_brands(limit=200, min_listings=1)
         ],
     }
 
@@ -96,7 +94,12 @@ def _show_recommendation(recommendation) -> tuple[RefinementChip, ...]:
         print("No supported catalog matches were found.")
 
     if recommendation.recommendation:
-        print(f"\n{recommendation.recommendation}")
+        # Render intro bullets as text. recommendation is a list of
+        # IntroBullet Pydantic objects (per domain/recommendation.py);
+        # printing the list directly would emit the repr, not the bullet text.
+        print("\n" + "\n".join(
+            f"- {bullet.text}" for bullet in recommendation.recommendation
+        ))
     if recommendation.assumptions:
         print("\nAssumptions:")
         for assumption in recommendation.assumptions:
@@ -105,8 +108,8 @@ def _show_recommendation(recommendation) -> tuple[RefinementChip, ...]:
         print("\nEvidence notes:")
         for note in recommendation.notes:
             print(f"- {note}")
-    if recommendation.dataset_notice:
-        print(f"\n{recommendation.dataset_notice}")
+    if recommendation.catalog_notice:
+        print(f"\n{recommendation.catalog_notice}")
 
     chips = recommendation.refinement_chips[:MAX_REFINEMENT_CHIPS]
     if chips:
@@ -147,7 +150,6 @@ async def run_chat() -> None:
     repository = ABOCatalogRepository(database)
     provider = os.getenv("RETAIL_PROVIDER", DEFAULT_PROVIDER)
     client = resolve_client()
-    tracker = CatalogEvidenceTracker()
     audit_logger = None
     audit_path = os.getenv("RETAIL_AUDIT_LOG")
     if audit_path:
@@ -155,12 +157,11 @@ async def run_chat() -> None:
         audit_logger = AuditLogger(Path(audit_path))
     catalog_vocabulary = _load_catalog_vocabulary(repository)
     catalog_tools = _build_catalog_tools(
-        repository, catalog_tracker=tracker, audit_logger=audit_logger
+        repository, audit_logger=audit_logger
     )
     agent = build_shopping_agent(
         client,
         catalog_tools,
-        tracker=tracker,
         provider=provider,
         audit_logger=audit_logger,
         catalog_vocabulary=catalog_vocabulary,
@@ -185,7 +186,13 @@ async def run_chat() -> None:
             if not user_message or user_message.lower() in {"quit", "exit"}:
                 break
 
-            tracker.reset()
+            # Reset per-turn provenance state so item_ids from a previous
+            # turn are not treated as "seen this turn". target_use/must_have
+            # are overwritten fresh by extract_brief each turn, but clearing
+            # them here keeps the tie-breaker from reading stale intent.
+            session.state.pop("seen_item_ids", None)
+            session.state.pop("target_use", None)
+            session.state.pop("must_have", None)
             try:
                 response = await agent.run(user_message, session=session)
             except Exception as exc:
@@ -232,6 +239,7 @@ async def run_chat() -> None:
 
 
 def main() -> None:
+    load_dotenv()
     asyncio.run(run_chat())
 
 

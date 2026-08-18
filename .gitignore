@@ -21,6 +21,10 @@ __pycache__/
 *.pyo
 .venv/
 
+# Secrets (API keys, etc.)
+.env
+.env.*
+
 # OS
 .DS_Store
 Thumbs.db

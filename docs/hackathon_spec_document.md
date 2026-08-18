@@ -63,7 +63,7 @@ Architecture boundary: the app, catalog, and source live on the developer laptop
 | **Reasoning & planning** | Clarification gate: the agent asks one concise question when constraints conflict; otherwise extracts the brief and plans the tool sequence |
 | **Tool use** | 5 tools (extract_brief, find_product_types, find_brands, search_catalog, finalize_recommendations) with Pydantic schemas |
 | **Memory** | MAF `AgentSession` persists across turns; refinement chips continue the same session |
-| **RAG** | SQLite FTS5 retrieval over 145K products; the agent grounds every claim in catalog evidence (provenance tracker) |
+| **RAG** | SQLite FTS5 retrieval over 145K products; the agent grounds every claim in catalog evidence via per-shopper `ctx.session.state` provenance (invented IDs are dropped) |
 | **Deterministic finalization** | Application code — not the LLM — screens exact-vs-accessory and ranks (no hallucinated eligibility) |
 | **Audit** | Hash-chained JSONL audit log; `scripts/audit_verify.py` verifies truncation/reorder/tampering without producer code |
 
@@ -118,7 +118,7 @@ Two post-quantize fixups are automated (`scripts/_quark_fix_vllm_keys.py`): Quar
 
 ## 6. Project Source Code
 
-- **Repository**: https://github.com/rajasingh012/retail-concierge (AGPL-3.0)
+- **Repository**: https://github.com/rajasingh012/retail-concierge (Apache-2.0)
 - **Language**: Python 3.12, Microsoft Agent Framework (MAF core 1.13.0 / openai 1.12.0), SQLite FTS5
 - **Droplet scripts**: `scripts/` — upgrade_vllm.sh, deploy_droplet.sh, quantize_int8.sh, benchmark_concurrency.sh, catalog import/audit utilities
 - **Startup guide**: README.md (quick start), scripts/README.md (droplet lifecycle), DEPLOYMENT_JOURNAL.md (live issues + fixes)

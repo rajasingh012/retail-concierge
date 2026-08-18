@@ -9,7 +9,7 @@ from infrastructure.agent_tools import build_tools, cache_stats, clear_cache
 from infrastructure.chat_clients import build_chat_client
 from infrastructure.database import ABOCatalogRepository
 from use_cases.shopping_agent import (
-    CatalogEvidenceTracker, build_shopping_agent,
+    build_shopping_agent,
     finalized_candidates_from_response, structured_recommendation_from_response,
 )
 
@@ -29,7 +29,6 @@ async def run_one(idx, query, agent, repo):
     t0 = time.perf_counter()
 
     session = agent.create_session()
-    tracker = CatalogEvidenceTracker()
     clear_cache()
 
     try:
@@ -93,9 +92,8 @@ async def main():
     print(f"vLLM endpoint: {os.getenv('RETAIL_BASE_URL', '(default)')}")
 
     client = build_chat_client(provider, model)
-    tracker = CatalogEvidenceTracker()
-    catalog_tools = build_tools(repo, catalog_tracker=tracker)
-    agent = build_shopping_agent(client, catalog_tools, tracker=tracker, provider=provider)
+    catalog_tools = build_tools(repo)
+    agent = build_shopping_agent(client, catalog_tools, provider=provider)
 
     for i, q in enumerate(QUERIES, 1):
         try:

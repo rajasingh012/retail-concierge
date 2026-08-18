@@ -21,7 +21,6 @@ def get_agent():
     from infrastructure.chat_clients import build_chat_client
     from infrastructure.database import ABOCatalogRepository
     from use_cases.shopping_agent import (
-        CatalogEvidenceTracker,
         build_shopping_agent,
     )
 
@@ -36,7 +35,6 @@ def get_agent():
     if api_key := os.getenv("RETAIL_API_KEY"):
         client_overrides["api_key"] = api_key
     client = build_chat_client(provider, model, **client_overrides)
-    tracker = CatalogEvidenceTracker()
     audit_logger = None
     audit_path = os.getenv("RETAIL_AUDIT_LOG")
     if audit_path:
@@ -45,11 +43,10 @@ def get_agent():
     from main import _load_catalog_vocabulary
 
     catalog_vocabulary = _load_catalog_vocabulary(repo)
-    catalog_tools = build_tools(repo, catalog_tracker=tracker, audit_logger=audit_logger)
+    catalog_tools = build_tools(repo, audit_logger=audit_logger)
     agent = build_shopping_agent(
         client,
         catalog_tools,
-        tracker=tracker,
         provider=provider,
         audit_logger=audit_logger,
         catalog_vocabulary=catalog_vocabulary,
@@ -75,6 +72,8 @@ with st.sidebar:
     if st.button("🔄 New Session"):
         st.session_state.messages = []
         st.session_state.chips = []
+        # A new conversation = a new AgentSession (fresh state dict).
+        st.session_state.session = agent.create_session()
         st.rerun()
 
 # ── session state ────────────────────────────────────────────────────────────
@@ -83,9 +82,7 @@ if "messages" not in st.session_state:
 if "chips" not in st.session_state:
     st.session_state.chips = []
 if "session" not in st.session_state:
-    from use_cases.shopping_agent import CatalogEvidenceTracker
     st.session_state.session = agent.create_session()
-    st.session_state.tracker = CatalogEvidenceTracker()
 
 def _render_card(item: dict) -> None:
     rank = item.get("rank", "?")
@@ -168,7 +165,11 @@ if prompt:
                 finalized_candidates_from_response,
                 structured_recommendation_from_response,
             )
-            st.session_state.tracker.reset()
+            # Reset per-turn provenance state so item_ids from a previous
+            # turn are not treated as "seen this turn".
+            st.session_state.session.state.pop("seen_item_ids", None)
+            st.session_state.session.state.pop("target_use", None)
+            st.session_state.session.state.pop("must_have", None)
             response = asyncio.run(agent.run(prompt, session=st.session_state.session))
             rec = structured_recommendation_from_response(response)
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from typing import Any
 
@@ -55,10 +56,72 @@ def _brand_score(candidate: dict) -> float:
     return 1.0 if brand and brand.strip() else 0.0
 
 
+def _target_use_match_score(
+    candidate: dict,
+    target_use: str,
+    must_have: list[str],
+) -> float:
+    """Tie-breaker score 0-1 for prose-level intent match.
+
+    NOT a primary ranking signal. Used only to break ties between candidates
+    whose weighted score is identical. Returns 1.0 when the candidate's
+    title / bullets / brand contain any token from ``target_use`` or
+    ``must_have``; 0.0 otherwise. Whole-word, case-insensitive.
+
+    Args:
+        candidate: The raw candidate dict (title_en, brand_en, plus the
+            ``_bullet_text`` field the search tool attaches for provenance
+            scoring).
+        target_use: Free-text ``target_use`` from the brief (e.g. "home
+            office", "commuting"). Empty string skips the check.
+        must_have: Hard-constraint strings from the brief. Any token that
+            appears in the candidate's title or bullet text counts as a
+            hit.
+
+    Returns:
+        A score in [0.0, 1.0]. The caller scales it by a small weight so
+        the primary ranking is undisturbed.
+    """
+    if not target_use and not must_have:
+        return 0.0
+    haystack_parts: list[str] = []
+    title = candidate.get("title_en") or ""
+    brand = candidate.get("brand_en") or ""
+    bullets = candidate.get("_bullet_text") or ""
+    if title:
+        haystack_parts.append(str(title))
+    if brand:
+        haystack_parts.append(str(brand))
+    if bullets:
+        haystack_parts.append(str(bullets))
+    haystack = " ".join(haystack_parts).lower()
+    if not haystack:
+        return 0.0
+    tokens: list[str] = []
+    if target_use:
+        tokens.extend(t.lower() for t in target_use.split() if t.strip())
+    for must in must_have:
+        if not isinstance(must, str) or not must.strip():
+            continue
+        if " " in must:
+            tokens.append(must.lower())
+        else:
+            tokens.append(must.lower())
+    if not tokens:
+        return 0.0
+    hits = 0
+    for token in tokens:
+        if re.search(r"\b" + re.escape(token) + r"\b", haystack):
+            hits += 1
+    return hits / len(tokens)
+
+
 def screen_and_rank_candidates(
     research: dict,
     *,
     allowed_item_ids: set[str] | None = None,
+    target_use: str = "",
+    must_have: list[str] | None = None,
     limit: int = MAX_RANKED_CANDIDATES,
 ) -> dict:
     """Keep LLM-classified exact products and rerank catalog evidence.
@@ -74,6 +137,12 @@ def screen_and_rank_candidates(
     in the set survive; unknown or invented IDs are dropped. When the set is
     ``None`` the catalog-evidence guarantee is not available and the function
     falls back to trusting the input.
+
+    When ``target_use`` or ``must_have`` is non-empty, a separate
+    :func:`_target_use_match_score` is computed per candidate and used as
+    a SECONDARY sort key (not a weighted signal). This breaks ties between
+    candidates whose primary score is identical without disturbing the
+    primary ranking when the intent terms are absent or irrelevant.
     """
     raw_candidates = research.get("candidates", [])
     if not isinstance(raw_candidates, list):
@@ -107,6 +176,7 @@ def screen_and_rank_candidates(
         eligible.append(candidate)
         seen_ids.add(item_id)
 
+    must_have_list: list[str] = list(must_have or [])
     for candidate in eligible:
         retrieval_rank = candidate["retrieval_rank"]
         relevance = 1.0 / math.log2(retrieval_rank + 1)
@@ -121,6 +191,9 @@ def screen_and_rank_candidates(
             + _BRAND_WEIGHT * brand
             + _DIMENSION_WEIGHT * dimension
         )
+        intent_match = _target_use_match_score(
+            candidate, target_use, must_have_list
+        )
         candidate["ranking_score"] = round(score, 6)
         candidate["ranking_signals"] = {
             "text_relevance": round(relevance, 6),
@@ -128,11 +201,16 @@ def screen_and_rank_candidates(
             "material_present": material,
             "brand_present": brand,
             "dimension_present": dimension,
+            "intent_match": round(intent_match, 6),
         }
 
+    # Primary sort: weighted score (descending). Secondary sort: intent match
+    # score (descending) — only matters when two candidates tie on the
+    # primary score, so it cannot override the deterministic ranking.
     eligible.sort(
         key=lambda item: (
             -item["ranking_score"],
+            -item["ranking_signals"]["intent_match"],
             item["retrieval_rank"],
             str(item.get("item_id", "")),
         )

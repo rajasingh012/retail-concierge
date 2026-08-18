@@ -6,7 +6,7 @@ SQLite FTS5 retrieves candidates from 145K products across 576 product types. Th
 
 The system never claims current prices, availability, shipping, ratings, or specifications absent from the catalog, and it does not add items to a cart or make purchases.
 
-![Track 2: Agentic AI](https://img.shields.io/badge/AMD-AI--DevMaster%202026-CC0000) ![GPU: MI300X](https://img.shields.io/badge/GPU-AMD%20Instinct%20MI300X-FF6B00) ![ROCm 7.2.3](https://img.shields.io/badge/ROCm-7.2.3-0086CB) ![vLLM 0.26.0+rocm723](https://img.shields.io/badge/vLLM-0.26.0%2Brocm723-7B68EE) ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB) ![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Track 2: Agentic AI](https://img.shields.io/badge/AMD-AI--DevMaster%202026-CC0000) ![GPU: MI300X](https://img.shields.io/badge/GPU-AMD%20Instinct%20MI300X-FF6B00) ![ROCm 7.2.3](https://img.shields.io/badge/ROCm-7.2.3-0086CB) ![vLLM 0.26.0+rocm723](https://img.shields.io/badge/vLLM-0.26.0%2Brocm723-7B68EE) ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB) ![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue)
 
 ## Live demo
 

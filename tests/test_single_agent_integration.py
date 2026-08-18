@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from agent_framework import ChatResponse, Content, Message
+from agent_framework import AgentSession, ChatResponse, Content, FunctionInvocationContext, Message
 from agent_framework._clients import BaseChatClient
 from agent_framework._tools import FunctionInvocationLayer
 
@@ -122,21 +122,26 @@ def test_real_agent_run_reuses_session_and_enforces_provenance(tmp_path: Path) -
     import_catalog(archive, db_path)
     repo = ABOCatalogRepository(db_path)
 
-    tracker = type("Tracker", (), {})  # placeholder, replaced below
-    from use_cases.shopping_agent import CatalogEvidenceTracker
-
-    tracker = CatalogEvidenceTracker()
-    catalog_tools = build_catalog_tools(repo, catalog_tracker=tracker)
+    catalog_tools = build_catalog_tools(repo)
     search_catalog = next(
         tool for tool in catalog_tools if getattr(tool, "name", "") == "search_catalog"
     )
 
-    search_catalog(query="ThinkPad charger", product_type="POWER_ADAPTER", limit=10)
+    session = AgentSession()
+    ctx = FunctionInvocationContext(
+        function=None,  # type: ignore[arg-type]
+        arguments={},
+        session=session,
+    )
+    search_catalog(
+        ctx=ctx,
+        query="ThinkPad charger",
+        product_type="POWER_ADAPTER",
+        limit=10,
+    )
 
     client = ScriptedChatClient("CHARGER1")
-    agent = build_shopping_agent(client, catalog_tools, tracker=tracker)
-    session = agent.create_session()
-
+    agent = build_shopping_agent(client, catalog_tools)
     first = asyncio.run(agent.run("I need a laptop charger", session=session))
     second = asyncio.run(agent.run("ThinkPad T14", session=session))
 
@@ -159,23 +164,32 @@ def test_invented_ids_are_dropped_by_finalizer(tmp_path: Path) -> None:
     import_catalog(archive, db_path)
     repo = ABOCatalogRepository(db_path)
 
-    from use_cases.shopping_agent import CatalogEvidenceTracker
-
-    tracker = CatalogEvidenceTracker()
-    catalog_tools = build_catalog_tools(repo, catalog_tracker=tracker)
+    catalog_tools = build_catalog_tools(repo)
     search_catalog = next(
         tool for tool in catalog_tools if getattr(tool, "name", "") == "search_catalog"
     )
-    search_catalog(query="ThinkPad charger", product_type="POWER_ADAPTER", limit=10)
+    session = AgentSession()
+    ctx = FunctionInvocationContext(
+        function=None,  # type: ignore[arg-type]
+        arguments={},
+        session=session,
+    )
+    search_catalog(
+        ctx=ctx,
+        query="ThinkPad charger",
+        product_type="POWER_ADAPTER",
+        limit=10,
+    )
 
     finalizer = next(
         tool
         for tool in build_shopping_agent(
-            type("C", (), {})(), catalog_tools, tracker=tracker
+            type("C", (), {})(), catalog_tools
         ).default_options["tools"]
         if getattr(tool, "name", "") == FINALIZE_RECOMMENDATIONS_TOOL
     )
     finalized = finalizer(
+        ctx=ctx,
         candidates=[
             {
                 "item_id": "CHARGER1",

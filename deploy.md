@@ -131,7 +131,7 @@ DEEPSEEK_API_KEY=*** \
 - One MAF agent owns the conversation and reuses one `AgentSession`.
 - All tools are read-only; the application cannot add items to a cart or purchase them.
 - SQLite FTS5 retrieves candidates; the agent classifies product identity before deterministic application-owned ranking.
-- `CatalogEvidenceTracker` enforces catalog provenance: the `finalize_recommendations` tool drops any candidate whose `item_id` was not returned by `search_catalog` in the current session.
+- Per-shopper provenance lives on MAF `AgentSession.state`: `search_catalog` writes returned `item_id` values into `ctx.session.state['seen_item_ids']`, and `finalize_recommendations` drops any candidate whose `item_id` was not returned by `search_catalog` in the current session.
 - Non-exact products and unknown IDs cannot enter the displayed recommendation set.
 - The offline catalog has no prices, ratings, reviews, popularity, or live availability.
 - Only inference requires network access during the demo.

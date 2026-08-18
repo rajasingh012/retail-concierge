@@ -19,13 +19,13 @@ from use_cases.ranking import screen_and_rank_candidates
 from use_cases.shopping_agent import (
     EXTRACT_BRIEF_TOOL,
     FINALIZE_RECOMMENDATIONS_TOOL,
-    CatalogEvidenceTracker,
     _build_agent_tools,
     _make_finalize_tool,
     enforce_finalized_recommendation,
     finalized_candidates_from_response,
     structured_recommendation_from_response,
 )
+from agent_framework import AgentSession, FunctionInvocationContext
 
 
 def _write_minimal_shards(root: Path, rows: list[dict]) -> Path:
@@ -135,7 +135,13 @@ def test_tool_cache_tracks_hits(tmp_path: Path) -> None:
     repo = ABOCatalogRepository(db_path)
     search_catalog = build_tools(repo)[2]
     clear_cache()
+    ctx = FunctionInvocationContext(
+        function=None,  # type: ignore[arg-type]
+        arguments={},
+        session=AgentSession(),
+    )
     kwargs = {
+        "ctx": ctx,
         "query": "office chair",
         "product_type": "CHAIR",
         "max_dimension_cm": 0,
@@ -166,9 +172,8 @@ def test_shopping_agent_wires_tools_in_canonical_order(tmp_path: Path) -> None:
     import_catalog(archive, db_path)
     repo = ABOCatalogRepository(db_path)
 
-    tracker = CatalogEvidenceTracker()
-    catalog_tools = build_tools(repo, catalog_tracker=tracker)
-    tools = _build_agent_tools(catalog_tools, tracker=tracker)
+    catalog_tools = build_tools(repo)
+    tools = _build_agent_tools(catalog_tools)
 
     assert [tool.name for tool in tools] == [
         EXTRACT_BRIEF_TOOL,
@@ -202,7 +207,7 @@ def test_session_keeps_clarification_answer_in_one_conversation() -> None:
                             "ranked": [],
                             "notes": ["No supported catalog match"],
                             "refinement_chips": [],
-                            "dataset_notice": "snapshot",
+                            "catalog_notice": "snapshot",
                         }
                     )
                 },
@@ -234,14 +239,22 @@ def test_finalize_tool_enforces_eligibility_order_and_provenance(tmp_path: Path)
     import_catalog(archive, db_path)
     repo = ABOCatalogRepository(db_path)
 
-    tracker = CatalogEvidenceTracker()
-    search_catalog = build_tools(repo, catalog_tracker=tracker)[2]
-    candidates_payload = json.loads(search_catalog(query="office chair", limit=10))
+    session = AgentSession()
+    ctx = FunctionInvocationContext(
+        function=None,  # type: ignore[arg-type]
+        arguments={},
+        session=session,
+    )
+    search_catalog = build_tools(repo)[2]
+    candidates_payload = json.loads(
+        search_catalog(ctx=ctx, query="office chair", limit=10)
+    )
 
-    finalizer = _make_finalize_tool(tracker)
+    finalizer = _make_finalize_tool()
     catalog_ids = {row["item_id"] for row in candidates_payload}
     accessory_id = next(iter(catalog_ids))
     finalized = finalizer(
+        ctx=ctx,
         candidates=[
             {
                 "item_id": accessory_id,
@@ -357,6 +370,7 @@ def test_multifield_ranking_uses_abo_signals() -> None:
         "material_present",
         "brand_present",
         "dimension_present",
+        "intent_match",
     }
 
 
