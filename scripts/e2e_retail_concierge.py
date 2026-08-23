@@ -115,23 +115,20 @@ def run_query(page, query: str) -> dict:
     time.sleep(SETTLE_S)  # let the final rerun land
 
     # Expand any collapsed expanders (Assumptions) in the last message.
-    last = page.locator("[data-testid='stChatMessage']").nth(-1)
-    for summary in last.locator("details summary").all():
+    msg_el = page.locator("[data-testid='stChatMessage']").nth(-1)
+    for summary in msg_el.locator("details summary").all():
         try:
             summary.click()
         except Exception:
             pass
     time.sleep(0.5)
 
-    html = last.inner_html()
-    # Drop the assistant-avatar element: Streamlit's default avatar is a
-    # Material icon whose glyph label ("smart_toy") pollutes text extraction.
-    html = re.sub(
-        r'<[^>]*data-testid="stChatMessageAvatar[^"]*"[^>]*>.*?</[^>]*>',
-        "",
-        html,
-        flags=re.S,
-    )
+    # Read only the message BODY, not the whole stChatMessage container:
+    # the assistant avatar (a Material icon whose glyph label is "smart_toy")
+    # is a sibling div, and stChatMessageContent is the stable testid
+    # Streamlit's own Playwright e2e suite targets.
+    content_el = msg_el.locator('[data-testid="stChatMessageContent"]')
+    html = content_el.first.inner_html() if content_el.count() else msg_el.inner_html()
     cards = _cards_from_html(html)
     if cards:
         first_anchor = re.search(r'<h3 id="\d+"', html)
