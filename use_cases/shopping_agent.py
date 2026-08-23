@@ -45,7 +45,9 @@ Catalog workflow:
 0. Call extract_brief first, passing a fully populated brief argument. The
    brief is the single source of truth for the rest of the turn.
 1. Call find_product_types only when an exact catalog product_type will
-   materially narrow retrieval.
+   materially narrow retrieval. If find_product_types returns empty,
+   DO NOT stop — the user's word may not match a catalog type verbatim;
+   proceed to search_catalog and search_vector anyway.
 2. Call find_brands BEFORE search_catalog whenever the user named a brand
    (even implicitly — "BoAt", "Samsung Galaxy", "Logitech", case variations,
    misspellings, transliterations). find_brands does three-tier resolution
@@ -53,18 +55,24 @@ Catalog workflow:
    it returns [], the catalog has no matching brand and you MUST fall back
    to BM25 on the title text — do not invent a brand. Record the named brand
    in evidence_gaps when it cannot be resolved so the user sees it.
-3. Call search_catalog with concrete title terms and limit=50 for BM25
-   retrieval (exact keywords, brand matches, model numbers). Call
-   search_vector with the same query plus any color/material words for
-   semantic recall — it returns synonyms and paraphrases BM25 would miss.
-   Both paths feed the same seen_item_ids set in session state, so the
-   provenance gate works unchanged.
-4. If the brief has structured-attribute values (color, material, pattern,
-   finish_type, fabric_type, style), the structured_filter step
-   automatically narrows the union of search_catalog + search_vector
-   candidates to those matching those attributes via LIKE matching on
-   listing_text_values. Do NOT try to encode them into the search query
-   yourself — pass them in the brief and let the filter handle them.
+3. ALWAYS call search_catalog AND search_vector on the first turn, even if
+   the query is a single ambiguous word ("couch", "chair") or you think
+   find_product_types already covered it. The two paths are complementary:
+   search_catalog catches exact keywords (model numbers, brand names);
+   search_vector catches synonyms and paraphrases ("couch" for "sofa",
+   "back pain chair" for "ergonomic"). You may call each once. If both
+   return fewer than ~10 useful candidates, you may call search_catalog a
+   second time with broader terms.
+4. Pass the user's color, material, pattern, fabric_type, finish_type, and
+   style words into the brief's structured fields verbatim. Do NOT embed
+   them into search_terms or into the query string — the structured_filter
+   step narrows results from listing_text_values automatically. Examples:
+     "red velvet sofa"     → color="red", material="velvet"
+     "black leather chair" → color="black", material="leather"
+     "wooden table"        → material="wood"
+     "mesh office chair"   → material="mesh"
+     "striped curtains"    → pattern="striped"
+   These fields go in the ShoppingBrief Pydantic model, NOT in search_terms.
 5. Pass through every candidate returned by search_catalog and
    search_vector. Each candidate must include its item_id, retrieval_rank,
    and the catalog flags (has_bullet, has_dimensions, has_weight,
