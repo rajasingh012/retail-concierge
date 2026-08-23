@@ -168,6 +168,11 @@ erDiagram
     string key PK
     string value
   }
+
+Note: `vec_index_meta` is a deliberate sidecar — a key/value table that
+records which model + dim + build timestamp produced the vector index.
+It has no relationship line into the ER diagram on purpose: it's a flat
+KV store, not a normalized entity tied to `listings`.
 ```
 
 FTS5 returns BM25-ordered candidates with optional SQL filters for product type and dimension. `search_catalog` records returned `item_id`s into the session's `ctx.session.state`; `finalize_recommendations` reads that state and drops anything not seen — invented IDs cannot reach the displayed list or the bullet list. The catalog carries no prices, ratings, popularity, or availability; the IntroBullet `claim_kind` enum reflects this. Implementation: `infrastructure/database.py`, `use_cases/ranking.py`.
@@ -253,7 +258,7 @@ When `finalize_recommendations` runs, the log records the full picture: every it
 flowchart LR
   proposed["model proposes<br/>to finalize_recommendations"]
   state["ctx.session.state<br/>(item_ids from search_catalog)"]
-  gate["provenance gate<br/>drop ∉ session.state"]
+  gate["provenance gate<br/>drop items not in session.state"]
   accepted["accepted_item_ids<br/>displayed to user"]
   blocked["provenance_blocked<br/>audit-only,<br/>never displayed"]
 
