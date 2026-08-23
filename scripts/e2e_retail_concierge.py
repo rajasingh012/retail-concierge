@@ -124,6 +124,14 @@ def run_query(page, query: str) -> dict:
     time.sleep(0.5)
 
     html = last.inner_html()
+    # Drop the assistant-avatar element: Streamlit's default avatar is a
+    # Material icon whose glyph label ("smart_toy") pollutes text extraction.
+    html = re.sub(
+        r'<[^>]*data-testid="stChatMessageAvatar[^"]*"[^>]*>.*?</[^>]*>',
+        "",
+        html,
+        flags=re.S,
+    )
     cards = _cards_from_html(html)
     if cards:
         first_anchor = re.search(r'<h3 id="\d+"', html)
