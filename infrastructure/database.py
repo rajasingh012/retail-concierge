@@ -310,6 +310,10 @@ class ABOCatalogRepository:
 
     def __init__(self, db_path: str | Path, *, read_only: bool = True) -> None:
         path = Path(db_path).expanduser().resolve()
+        # Keep the resolved path: the read-only URI connection can't load
+        # the sqlite-vec extension, so search_vector / apply_structured_filter
+        # open short-lived writable connections to this same file.
+        self._db_path = str(path)
         if read_only:
             if not path.is_file():
                 raise FileNotFoundError(
@@ -677,15 +681,10 @@ class ABOCatalogRepository:
         )
 
         limit = max(1, min(limit, 50))
-        # Derive DB path from the connection string. The repository opens
-        # with ``file:{path}?mode=ro``; we strip the URI scheme here.
-        db_uri = str(self._conn)
-        if db_uri.startswith("file:") and "?mode=ro" in db_uri:
-            db_path = db_uri[len("file:") :].split("?")[0]
-        else:
-            db_path = db_uri
-
-        conn = sqlite3.connect(db_path)
+        # Open a fresh writable connection to the catalog file. The repo's
+        # main connection is read-only (file:...?mode=ro) and cannot load
+        # extensions; sqlite-vec must be loaded on a writable connection.
+        conn = sqlite3.connect(self._db_path)
         try:
             conn.execute("PRAGMA foreign_keys = ON")
             load_sqlite_vec(conn)
@@ -756,12 +755,10 @@ class ABOCatalogRepository:
         """
         from infrastructure.structured_filter import apply_structured_filter
 
-        db_uri = str(self._conn)
-        if db_uri.startswith("file:") and "?mode=ro" in db_uri:
-            db_path = db_uri[len("file:") :].split("?")[0]
-        else:
-            db_path = db_uri
-        conn = sqlite3.connect(db_path)
+        # Same pattern as search_vector: the read-only URI connection can't
+        # load extensions, but this helper only needs plain SQL — open a
+        # fresh writable connection to the catalog file.
+        conn = sqlite3.connect(self._db_path)
         try:
             return apply_structured_filter(
                 conn,

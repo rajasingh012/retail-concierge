@@ -129,7 +129,7 @@ def _encode_and_insert(
     model,
     rows: list[tuple[str, str]],
     *,
-    batch_size: int = 256,
+    batch_size: int = 8,
 ) -> tuple[int, int]:
     """Encode ``rows`` in batches and INSERT into vec_items.
 
