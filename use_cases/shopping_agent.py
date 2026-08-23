@@ -53,20 +53,30 @@ Catalog workflow:
    it returns [], the catalog has no matching brand and you MUST fall back
    to BM25 on the title text — do not invent a brand. Record the named brand
    in evidence_gaps when it cannot be resolved so the user sees it.
-3. Call search_catalog with concrete title terms and limit=50. Broaden the title
-   terms once if too few useful candidates are returned. If all searches return
-   empty or only unrelated items, respond with an honest note — do not invent.
-4. Pass through every candidate returned by search_catalog. Each candidate
-   must include its item_id, retrieval_rank, and the catalog flags
-   (has_bullet, has_dimensions, has_weight, has_material) you received.
-5. Classify each item as exactly one of: exact_product, accessory, unrelated,
+3. Call search_catalog with concrete title terms and limit=50 for BM25
+   retrieval (exact keywords, brand matches, model numbers). Call
+   search_vector with the same query plus any color/material words for
+   semantic recall — it returns synonyms and paraphrases BM25 would miss.
+   Both paths feed the same seen_item_ids set in session state, so the
+   provenance gate works unchanged.
+4. If the brief has structured-attribute values (color, material, pattern,
+   finish_type, fabric_type, style), the structured_filter step
+   automatically narrows the union of search_catalog + search_vector
+   candidates to those matching those attributes via LIKE matching on
+   listing_text_values. Do NOT try to encode them into the search query
+   yourself — pass them in the brief and let the filter handle them.
+5. Pass through every candidate returned by search_catalog and
+   search_vector. Each candidate must include its item_id, retrieval_rank,
+   and the catalog flags (has_bullet, has_dimensions, has_weight,
+   has_material) you received.
+6. Classify each item as exactly one of: exact_product, accessory, unrelated,
    uncertain. Set the `classification` field on each candidate dict to the
    value. Covers, mats, pillows, replacement parts, and add-ons are not
    the requested primary product.
-6. Call finalize_recommendations once with the full classified list. The
+7. Call finalize_recommendations once with the full classified list. The
    application code removes ineligible products and applies deterministic
    ranking. Never add an item the finalizer didn't return.
-7. After calling finalize_recommendations, your ENTIRE response MUST be a
+8. After calling finalize_recommendations, your ENTIRE response MUST be a
    single JSON object — no text before, no thinking, no code fences. The
    JSON schema is specified below in "Final response".
 
@@ -74,8 +84,9 @@ Brief extraction rules:
 - intent: one sentence in the user's voice, what they want.
 - search_terms: 2-4 concrete catalog terms, most discriminating first. Terms
   MUST be drawn from the user's words; do not invent terms the user did not say.
-- product_type / brand / color / material / compatibility / target_use: empty
-  string when the user did not specify. Never guess.
+- product_type / brand / color / material / pattern / finish_type /
+  fabric_type / style / compatibility / target_use: empty string when
+  the user did not specify. Never guess.
 - budget_usd: stated budget in USD. 0 when unspecified.
 - max_dimension_cm: convert to centimeters. 0 means no ceiling.
 - quantity: 1 when unspecified. "pair" -> 2, "dozen" -> 12. Keep
@@ -178,17 +189,24 @@ def _build_agent_tools(
     *,
     audit_logger: Any = None,
     catalog_vocabulary: dict[str, list[str]] | None = None,
+    repository: Any = None,
 ) -> list[Any]:
     """Compose the tool list for the shopping agent.
 
     Order is part of the contract: ``extract_brief`` runs first, the three
     catalog tools in between, and ``finalize_recommendations`` last so the
     model can use the evidence it observed earlier in the turn.
+
+    ``repository`` is optional and only used by ``finalize_recommendations``
+    to apply the brief's structured-filter attributes (color, material,
+    etc.) as a pre-filter on the union of search_catalog + search_vector
+    candidates. When omitted (e.g. tests that don't exercise the filter),
+    the finalize tool skips the pre-filter step.
     """
     return [
         _make_extract_brief_tool(catalog_vocabulary=catalog_vocabulary),
         *catalog_tools,
-        _make_finalize_tool(audit_logger=audit_logger),
+        _make_finalize_tool(audit_logger=audit_logger, repository=repository),
     ]
 
 
@@ -215,6 +233,7 @@ def build_shopping_agent(
     provider: str = "",
     audit_logger: Any = None,
     catalog_vocabulary: dict[str, list[str]] | None = None,
+    repository: Any = None,
 ) -> Agent:
     """Build the one MAF agent used for every turn in a shopping session.
 
@@ -268,6 +287,7 @@ def build_shopping_agent(
             catalog_tools,
             audit_logger=audit_logger,
             catalog_vocabulary=catalog_vocabulary,
+            repository=repository,
         ),
         context_providers=[_build_vocabulary_provider(catalog_vocabulary)],
         default_options=default_options,
@@ -291,7 +311,7 @@ def _build_vocabulary_provider(
     )
 
 
-def _make_finalize_tool(audit_logger: Any = None):
+def _make_finalize_tool(audit_logger: Any = None, repository: Any = None):
     @tool(
         name=FINALIZE_RECOMMENDATIONS_TOOL,
         description=(
@@ -309,6 +329,14 @@ def _make_finalize_tool(audit_logger: Any = None):
         Reads the per-session ``seen_item_ids`` set written by
         ``search_catalog`` (via ``ctx.session.state``) and the brief's
         ``target_use`` / ``must_have`` written by ``extract_brief``.
+
+        If the brief has any structured-attribute values (color, material,
+        pattern, finish_type, fabric_type, style) and a repository was
+        provided at agent-build time, the proposed candidates are first
+        pre-filtered against ``listing_text_values`` via LIKE matching.
+        Candidates that don't satisfy every specified filter are dropped
+        before the ranking step. Filtered candidates are reported in the
+        audit log so provenance stays intact.
         """
         state = ctx.session.state if ctx.session is not None else {}
         seen = set(state.get("seen_item_ids") or ())
@@ -317,11 +345,62 @@ def _make_finalize_tool(audit_logger: Any = None):
         must_have_list: list[str] = [
             m for m in must_have_raw if isinstance(m, str) and m.strip()
         ]
+        structured_filter_kwargs = {
+            "color": str(state.get("target_color") or ""),
+            "material": str(state.get("target_material") or ""),
+            "pattern": str(state.get("target_pattern") or ""),
+            "finish_type": str(state.get("target_finish_type") or ""),
+            "fabric_type": str(state.get("target_fabric_type") or ""),
+            "style": str(state.get("target_style") or ""),
+        }
+        has_structured_filter = any(
+            v.strip() for v in structured_filter_kwargs.values()
+        )
+
         proposed_item_ids = [
             str(c.get("item_id"))
             for c in candidates
             if isinstance(c, dict) and c.get("item_id")
         ]
+        structured_filter_survivors: set[str] = set()
+        structured_filter_blocked: list[str] = []
+        if has_structured_filter and repository is not None:
+            try:
+                survivors = repository.apply_structured_filter(
+                    proposed_item_ids, **structured_filter_kwargs
+                )
+            except Exception as exc:
+                # Never let a structured-filter failure abort the finalizer;
+                # log to audit, fall back to no filter so the user still
+                # gets ranked results from BM25+vector.
+                if audit_logger is not None:
+                    record = getattr(audit_logger, "record", None)
+                    if record is not None:
+                        record(
+                            FINALIZE_RECOMMENDATIONS_TOOL,
+                            {
+                                "proposed_item_ids": proposed_item_ids,
+                                "structured_filter_kwargs": structured_filter_kwargs,
+                            },
+                            {"structured_filter_error": str(exc)},
+                        )
+                survivors = list(proposed_item_ids)
+            structured_filter_survivors = set(survivors)
+            structured_filter_blocked = [
+                item_id
+                for item_id in proposed_item_ids
+                if item_id not in structured_filter_survivors
+            ]
+            # Apply the structured filter by narrowing the candidate dict list
+            # to only those whose item_id survived. The model's proposed
+            # candidates that don't match color/material/etc. are dropped.
+            candidates = [
+                c
+                for c in candidates
+                if isinstance(c, dict)
+                and c.get("item_id") in structured_filter_survivors
+            ]
+
         result = screen_and_rank_candidates(
             {"candidates": candidates},
             allowed_item_ids=seen,
@@ -338,6 +417,11 @@ def _make_finalize_tool(audit_logger: Any = None):
                         "proposed_item_ids": proposed_item_ids,
                         "target_use": target_use,
                         "must_have": must_have_list,
+                        "structured_filter": (
+                            structured_filter_kwargs
+                            if has_structured_filter
+                            else None
+                        ),
                     },
                     {
                         "accepted_item_ids": accepted_item_ids,
@@ -346,6 +430,7 @@ def _make_finalize_tool(audit_logger: Any = None):
                             for item_id in proposed_item_ids
                             if item_id not in seen
                         ],
+                        "structured_filter_blocked": structured_filter_blocked,
                         "result_count": len(accepted_item_ids),
                     },
                 )
@@ -411,6 +496,15 @@ def _make_extract_brief_tool(catalog_vocabulary: dict[str, list[str]] | None = N
         if ctx.session is not None:
             ctx.session.state["target_use"] = validated.target_use
             ctx.session.state["must_have"] = list(validated.must_have)
+            # Structured-filter attributes — the finalize tool applies them
+            # as a pre-filter via apply_structured_filter on the union of
+            # search_catalog + search_vector candidates.
+            ctx.session.state["target_color"] = validated.color
+            ctx.session.state["target_material"] = validated.material
+            ctx.session.state["target_pattern"] = validated.pattern
+            ctx.session.state["target_finish_type"] = validated.finish_type
+            ctx.session.state["target_fabric_type"] = validated.fabric_type
+            ctx.session.state["target_style"] = validated.style
         return validated.model_dump()
 
     return extract_brief

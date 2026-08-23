@@ -18,6 +18,31 @@ _BRAND_WEIGHT = 0.10
 _DIMENSION_WEIGHT = 0.10
 
 
+def _vector_distance_score(candidate: dict) -> float:
+    """Score 0-1 from the sqlite-vec cosine distance (lower distance = better).
+
+    Returns 1.0 when ``candidate['distance']`` is missing (BM25-only path) so
+    candidates without a vector score don't get penalized. Distance is
+    in [0, 2] for unit-norm vectors with cosine; we map distance 0 → 1.0
+    and distance 1.0 → 0.0 linearly so it composes with the other 0-1 signals.
+
+    Used as a SECONDARY tie-breaker via the intent_match-style secondary sort
+    key (see screen_and_rank_candidates). The primary weighted score stays
+    unchanged so the BM25-first ranking contract is preserved.
+    """
+    dist = candidate.get("distance")
+    if dist is None:
+        return 1.0  # BM25 path; no penalty
+    try:
+        d = float(dist)
+    except (TypeError, ValueError):
+        return 1.0
+    # Cosine distance on unit-norm vectors lives in [0, 2]. Most useful
+    # matches fall in [0, 0.5]; clamp negatives at 0 and saturate above 1.0.
+    d = max(0.0, min(d, 1.0))
+    return 1.0 - d
+
+
 def _positive_int(value: Any, default: int) -> int:
     try:
         parsed = int(value)
@@ -184,6 +209,7 @@ def screen_and_rank_candidates(
         material = _material_score(candidate)
         brand = _brand_score(candidate)
         dimension = _dimension_score(candidate)
+        vector_distance = _vector_distance_score(candidate)
         score = (
             _RELEVANCE_WEIGHT * relevance
             + _BULLET_COVERAGE_WEIGHT * bullet
@@ -202,15 +228,19 @@ def screen_and_rank_candidates(
             "brand_present": brand,
             "dimension_present": dimension,
             "intent_match": round(intent_match, 6),
+            "vector_distance": round(vector_distance, 6),
         }
 
     # Primary sort: weighted score (descending). Secondary sort: intent match
     # score (descending) — only matters when two candidates tie on the
     # primary score, so it cannot override the deterministic ranking.
+    # Tertiary: vector distance score (descending) — same logic, breaks ties
+    # between vector-search candidates that share an intent-match score.
     eligible.sort(
         key=lambda item: (
             -item["ranking_score"],
             -item["ranking_signals"]["intent_match"],
+            -item["ranking_signals"]["vector_distance"],
             item["retrieval_rank"],
             str(item.get("item_id", "")),
         )

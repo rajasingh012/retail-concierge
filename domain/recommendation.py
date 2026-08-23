@@ -336,6 +336,22 @@ class ShoppingBrief(BaseModel):
     )
     color: str = Field(default="", description="Stated color. Empty when not specified.")
     material: str = Field(default="", description="Stated material. Empty when not specified.")
+    pattern: str = Field(
+        default="",
+        description="Stated pattern (e.g. 'striped', 'floral'). Empty when not specified.",
+    )
+    finish_type: str = Field(
+        default="",
+        description="Stated finish (e.g. 'matte', 'gloss'). Empty when not specified.",
+    )
+    fabric_type: str = Field(
+        default="",
+        description="Stated fabric (e.g. 'velvet', 'linen'). Empty when not specified.",
+    )
+    style: str = Field(
+        default="",
+        description="Stated style (e.g. 'modern', 'rustic'). Empty when not specified.",
+    )
     must_have: _LStr = Field(
         default_factory=list,
         description="Hard constraints the user stated; failure to meet any is blocking.",

@@ -1,13 +1,137 @@
 """Indexed SQLite catalog over the Amazon Berkeley Objects metadata archive."""
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from pathlib import Path
+from typing import Iterable
 
 # Short English-language tag preferred for flattening. When absent, fall back
 # to any English text, then any value.
 ENGLISH_LANG_RE = re.compile(r"^en(_|$)", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Vector index (sqlite-vec) constants
+# ---------------------------------------------------------------------------
+# Pinned at module level so the schema, the build script, and the KNN tool
+# all agree on the same model + dimension. Changing this requires dropping
+# the vec_items table and rebuilding — the catalog data is immutable so the
+# build is a one-shot operation.
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+EMBEDDING_DIM = 384
+
+# Structured attributes the structured_filter helper accepts. These map
+# 1:1 to the ``attribute`` column in ``listing_text_values``.
+STRUCTURED_FILTER_ATTRIBUTES = (
+    "color",
+    "material",
+    "pattern",
+    "finish_type",
+    "fabric_type",
+    "style",
+)
+
+
+def build_embedding_text(title_en: str | None, brand_en: str | None) -> str:
+    """Concatenate the two columns embedded into the vector for a listing.
+
+    Title + brand, lowercased, stripped. Mirrors the SQL builder used in
+    scripts/build_vector_index.py so the query-side encoding produces a
+    vector in the same neighborhood as the indexed rows.
+    """
+    parts: list[str] = []
+    if title_en and title_en.strip():
+        parts.append(title_en.strip().lower())
+    if brand_en and brand_en.strip():
+        parts.append(brand_en.strip().lower())
+    return ". ".join(parts)
+
+
+def load_sqlite_vec(conn: sqlite3.Connection) -> None:
+    """Load the sqlite-vec extension on ``conn``.
+
+    Uses sqlite3's ``enable_load_extension`` API. The extension is required
+    to create ``vec0`` virtual tables and run ``MATCH ... AND k = N`` KNN
+    queries.
+
+    On Linux + Python 3.11+, ``sqlite_vec`` ships a ``sqlite_vec`` Python
+    package whose entry point exposes ``loadable_path()`` returning the
+    compiled shared library path. This is the portable install path and
+    does not require ``SQLITE_EXTENSIONS_PATH`` overrides.
+    """
+    try:
+        import sqlite_vec  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "sqlite-vec is not installed in the active environment. "
+            "Run: uv pip install sqlite-vec"
+        ) from e
+
+    ext_path = sqlite_vec.loadable_path()
+    conn.enable_load_extension(True)
+    try:
+        conn.load_extension(ext_path)
+    finally:
+        conn.enable_load_extension(False)
+
+
+def vec_items_count(conn: sqlite3.Connection) -> int:
+    """Return the number of rows in ``vec_items`` (0 if table doesn't exist)."""
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM vec_items")
+    except sqlite3.OperationalError:
+        return 0
+    return int(cur.fetchone()[0])
+
+
+def vec_index_meta_insert(
+    conn: sqlite3.Connection,
+    *,
+    model_name: str,
+    dim: int,
+) -> None:
+    """Insert (or replace) the sidecar metadata that records what built
+    the index and when.
+
+    A future-self reading the database needs to know: which model? what
+    dimension? when? Without this row, you can't tell whether a stale
+    index needs rebuilding for a model swap or is still consistent.
+    """
+    import time
+
+    conn.execute("DELETE FROM vec_index_meta")
+    conn.execute(
+        "INSERT INTO vec_index_meta(key, value) VALUES (?, ?), (?, ?), (?, ?)",
+        ("model", model_name, "dim", str(dim), "built_at", str(int(time.time()))),
+    )
+
+
+def vec_index_meta_get(conn: sqlite3.Connection) -> dict[str, str]:
+    """Read the sidecar metadata as a dict. Empty dict if absent."""
+    try:
+        rows = conn.execute("SELECT key, value FROM vec_index_meta").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {row[0]: row[1] for row in rows}
+
+
+VECTOR_SCHEMA = """
+-- vec_items: KNN-searchable embedding for every active listing.
+-- item_id is the join key against listings.item_id (no FK so sqlite-vec
+-- stays simple — integrity is enforced at build time by skipping listings
+-- that don't exist in `listings`).
+CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(
+    item_id TEXT PRIMARY KEY,
+    embedding float[384]
+);
+
+-- vec_index_meta: sidecar KV recording what built the index.
+CREATE TABLE IF NOT EXISTS vec_index_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
 
 BASE_SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -146,6 +270,18 @@ def create_schema(conn: sqlite3.Connection, *, rebuild_fts: bool = False) -> Non
     conn.executescript(FTS_SCHEMA)
     conn.executescript(TEXT_VALUES_SCHEMA)
     conn.executescript(DIMENSIONS_SCHEMA)
+    # Vector index schema is conditional: requires sqlite-vec extension to be
+    # loaded. Skipped silently if the extension isn't installed; callers that
+    # need the index (build_vector_index.py) load the extension first and call
+    # this script's VECTOR_SCHEMA directly.
+    try:
+        load_sqlite_vec(conn)
+        conn.executescript(VECTOR_SCHEMA)
+    except RuntimeError:
+        # sqlite-vec not installed; the rest of the schema is unaffected.
+        # The vector build script and the search_vector tool both raise a
+        # clear error if the extension is missing at runtime.
+        pass
     if rebuild_fts:
         conn.execute("INSERT INTO listing_fts(listing_fts) VALUES ('rebuild')")
     conn.commit()
@@ -476,6 +612,169 @@ class ABOCatalogRepository:
                 params,
             ).fetchall()
         ]
+
+    def encode_query(self, text: str) -> bytes:
+        """Encode a query string to a 384-dim float32 bytes vector.
+
+        Uses the same BGE-small-en-v1.5 model that built the index (see
+        ``infrastructure.database.EMBEDDING_MODEL``) via fastembed (ONNX
+        runtime — no torch dependency, ~30MB model, fast cold-start).
+        Cached on the repository instance so repeated identical queries
+        (e.g. retries from the LLM) don't re-encode.
+
+        Returns:
+            Raw little-endian float32 bytes ready to bind into a
+            ``MATCH ?`` clause against ``vec_items``.
+        """
+        # Lazy import + lazy model load: fastembed pulls in onnxruntime
+        # (~30MB) which we don't want at import time.
+        if not hasattr(self, "_encoder") or self._encoder is None:  # type: ignore[attr-defined]
+            from fastembed import TextEmbedding  # type: ignore
+
+            from infrastructure.database import EMBEDDING_MODEL
+
+            self._encoder = TextEmbedding(model_name=EMBEDDING_MODEL)  # type: ignore[attr-defined]
+        # Reuse a small cache to skip identical re-encodings inside one session.
+        cache: dict[str, bytes] = getattr(self, "_encoder_cache", {})  # type: ignore[attr-defined]
+        if text in cache:
+            return cache[text]
+        import numpy as np
+
+        # fastembed returns a generator; pull the single embedding.
+        # normalize_embeddings is the default for BGE-small — vectors are
+        # unit-norm, so cosine distance == L2 distance^2 / 2.
+        embeddings = list(self._encoder.embed(text.strip().lower()))  # type: ignore[attr-defined]
+        if not embeddings:
+            raise RuntimeError(f"fastembed returned no embeddings for {text!r}")
+        vec = embeddings[0].astype("float32")
+        raw = vec.tobytes()
+        cache[text] = raw
+        self._encoder_cache = cache  # type: ignore[attr-defined]
+        return raw
+
+    def search_vector(
+        self,
+        query: bytes,
+        *,
+        limit: int = 50,
+        product_type: str = "",
+    ) -> list[dict]:
+        """KNN over ``vec_items`` using sqlite-vec's brute-force ``MATCH`` query.
+
+        Returns a list of dicts with ``item_id``, ``distance``, plus a few
+        denormalized columns joined from ``listings`` for ranking context.
+        Distance is cosine distance on unit-norm vectors, in [0, 2].
+        Lower = more similar; 0 = identical.
+
+        sqlite-vec requires the extension to be loaded on the connection.
+        The repository's main connection is opened read-only via URI, so
+        extension loading is unavailable. We open a separate writable
+        connection in a context manager — short-lived, single-statement.
+        """
+        from infrastructure.database import (
+            load_sqlite_vec,
+            vec_index_meta_get,
+        )
+
+        limit = max(1, min(limit, 50))
+        # Derive DB path from the connection string. The repository opens
+        # with ``file:{path}?mode=ro``; we strip the URI scheme here.
+        db_uri = str(self._conn)
+        if db_uri.startswith("file:") and "?mode=ro" in db_uri:
+            db_path = db_uri[len("file:") :].split("?")[0]
+        else:
+            db_path = db_uri
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            load_sqlite_vec(conn)
+            # Build the WHERE clause for product_type if requested.
+            where_clauses: list[str] = []
+            params: list[object] = [query, limit]
+            if product_type:
+                where_clauses.append("AND l.product_type = ?")
+                params.insert(-1, product_type)
+
+            # KNN MATCH ... AND k = N returns the N closest rows.
+            sql = f"""
+                SELECT v.item_id, v.distance,
+                       l.title_en, l.brand_en, l.product_type,
+                       l.product_url, l.marketplace, l.country,
+                       l.has_bullet, l.has_dimensions, l.has_weight,
+                       l.has_material, l.url_active
+                FROM vec_items v
+                JOIN listings l ON l.item_id = v.item_id
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                  {' '.join(where_clauses)}
+                ORDER BY v.distance
+            """
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
+        results: list[dict] = []
+        for rank, row in enumerate(rows, start=1):
+            results.append({
+                "item_id": row[0],
+                "distance": float(row[1]),
+                "retrieval_rank": rank,
+                "title_en": row[2] or "",
+                "brand_en": row[3] or "",
+                "product_type": row[4] or "",
+                "product_url": row[5] or "",
+                "marketplace": row[6] or "",
+                "country": row[7] or "",
+                "has_bullet": int(row[8] or 0),
+                "has_dimensions": int(row[9] or 0),
+                "has_weight": int(row[10] or 0),
+                "has_material": int(row[11] or 0),
+                "url_active": int(row[12] or 0),
+                "retrieval_backend": "vector",
+            })
+        return results
+
+    def apply_structured_filter(
+        self,
+        item_ids: Iterable[str],
+        *,
+        color: str = "",
+        material: str = "",
+        pattern: str = "",
+        finish_type: str = "",
+        fabric_type: str = "",
+        style: str = "",
+    ) -> list[str]:
+        """Apply structured-attribute LIKE filtering to a candidate set.
+
+        Opens a short-lived writable connection (sqlite-vec semantics
+        notwithstanding — this helper only touches listing_text_values
+        and uses no extensions) and runs
+        :func:`infrastructure.structured_filter.apply_structured_filter`.
+        Mirrors the connection pattern used by ``search_vector``.
+        """
+        from infrastructure.structured_filter import apply_structured_filter
+
+        db_uri = str(self._conn)
+        if db_uri.startswith("file:") and "?mode=ro" in db_uri:
+            db_path = db_uri[len("file:") :].split("?")[0]
+        else:
+            db_path = db_uri
+        conn = sqlite3.connect(db_path)
+        try:
+            return apply_structured_filter(
+                conn,
+                item_ids,
+                color=color,
+                material=material,
+                pattern=pattern,
+                finish_type=finish_type,
+                fabric_type=fabric_type,
+                style=style,
+            )
+        finally:
+            conn.close()
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
