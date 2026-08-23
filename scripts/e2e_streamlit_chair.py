@@ -1,14 +1,20 @@
-"""End-to-end browser test of the deployed RetailConcierge Streamlit app.
+"""End-to-end browser test of the RetailConcierge Streamlit app.
 
-Drives the chair-only demo at:
-  https://retail-concierge-9fz4fe3znfxcvqiqsncwxn.streamlit.app/
-
-with Playwright + Chromium (headed). Runs a fixed set of 6 shopping queries
-that exercise common chair shopping intents, parses the rendered recommendation
-cards from the chat HTML, and prints + saves a structured report.
+Drives the app with Playwright + Chromium (headed), runs a fixed set of
+shopping queries, parses the rendered recommendation cards from the chat
+HTML, and prints + saves a structured report.
 
 Usage:
-    python3 scripts/e2e_streamlit_chair.py
+    python3 scripts/e2e_streamlit_chair.py [URL]
+
+URL defaults to the deployed chair-only demo:
+    https://retail-concierge-9fz4fe3znfxcvqiqsncwxn.streamlit.app/~/+
+
+To test the hybrid-search flow (BM25 + sqlite-vec) locally, run the app on
+the PR branch against the chairs DB (which carries the embedding index) and
+pass the local URL:
+    RETAIL_DB=./retail_catalog_chair.db streamlit run app.py
+    python3 scripts/e2e_streamlit_chair.py http://localhost:8501
 
 The script writes:
     bench/results/e2e_streamlit_chair.json   - structured per-query results
@@ -21,6 +27,13 @@ query, waits for the assistant response (up to 180s ceiling), and records:
 - ranked cards: rank, brand, title, ASIN, Amazon URL, pros, cons
 - assumptions the agent disclosed
 - any errors / timeouts
+
+Query sets:
+- SHOPPING_QUERIES: common chair intents — smoke tests the deployed demo.
+- HYBRID_QUERIES: PR #1 claims — paraphrase / synonym / multilingual
+  caught by vector search, structured attribute pre-filter, and the
+  "red velvet" empty-result case (chair subset has zero red+velvet
+  overlap). These only make sense against the chairs DB with embeddings.
 
 This is a smoke/quality test, not a benchmark. Use the Streamlit Cloud
 "Manage" button (bottom-left of the app) to view deployment logs if a
@@ -41,13 +54,21 @@ from playwright.sync_api import sync_playwright
 
 APP_URL = "https://retail-concierge-9fz4fe3znfxcvqiqsncwxn.streamlit.app/~/+/"
 
-QUERIES = [
+SHOPPING_QUERIES = [
     "I need an office chair for long hours at my desk",
     "Show me ergonomic chairs with lumbar support",
     "Looking for a comfy gaming chair under $300",
     "I want a leather recliner for my living room",
     "Find me a kid's chair for studying, around $100",
     "Outdoor patio chair, weather-resistant, set of 4",
+]
+
+HYBRID_QUERIES = [
+    "chair for back pain",                # paraphrase -> vector catches "ergonomic"
+    "couch",                              # synonym -> vector catches "sofa"
+    "sofá reclinable",                    # multilingual -> vector catches reclining sofa
+    "black leather chair",                # structured filter: material=leather, color=black
+    "red velvet accent chair under $200", # 0 cards: catalog has no red+velvet chairs
 ]
 
 PER_QUERY_TIMEOUT_SEC = 180
@@ -77,17 +98,27 @@ class Result:
 
 
 def _last_message_html(page) -> str:
-    """Return the inner HTML of the last [data-testid='stChatMessage'].
+    """Return the inner HTML of the last assistant message body.
+
+    Scoped to [data-testid="stChatMessageContent"] — the stable testid
+    Streamlit's own Playwright e2e suite targets. The assistant avatar is a
+    SIBLING div whose Material icon glyph label ("smart_toy") would pollute
+    the text; reading the body container avoids it without any element
+    stripping. Falls back to the whole message element for very old
+    Streamlit versions.
 
     Reading inner HTML (not text) preserves the <strong>, <a href>, and
-    <code> tags that mark brand, title+URL, and ASIN. After a query Streamlit
-    renders the assistant response inside one chat-message container.
+    <code> tags that mark brand, title+URL, and ASIN.
     """
     msgs = page.locator('[data-testid="stChatMessage"]')
     n = msgs.count()
     if n == 0:
         return page.locator("body").inner_html(timeout=5000)
-    return msgs.nth(n - 1).inner_html(timeout=5000)
+    msg_el = msgs.nth(n - 1)
+    content_el = msg_el.locator('[data-testid="stChatMessageContent"]')
+    if content_el.count():
+        return content_el.first.inner_html(timeout=5000)
+    return msg_el.inner_html(timeout=5000)
 
 
 def _strip_tags(html: str) -> str:
@@ -157,7 +188,8 @@ def _parse_cards(html: str) -> tuple[list[Card], str, list[str]]:
             ]
         cards.append(c)
 
-    # Assumptions (Streamlit renders this inside an expander)
+    # Assumptions (Streamlit renders this inside an expander; content is in
+    # the DOM even when collapsed).
     assumps: list[str] = []
     asm = re.search(
         r"Assumptions[^<]*</[^>]+>(.*?)(?:Refine[^<]*</[^>]+>|$)", html, re.DOTALL
@@ -243,14 +275,16 @@ def _print_summary(results: list[Result]) -> None:
 
 
 def main() -> int:
+    url = sys.argv[1] if len(sys.argv) > 1 else APP_URL
+    queries = SHOPPING_QUERIES + HYBRID_QUERIES
     results: list[Result] = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, args=["--no-sandbox"])
         ctx = browser.new_context(viewport={"width": 1400, "height": 900})
         page = ctx.new_page()
 
-        print(f"Loading {APP_URL}")
-        page.goto(APP_URL, wait_until="domcontentloaded")
+        print(f"Loading {url}")
+        page.goto(url, wait_until="domcontentloaded")
         try:
             page.locator('[data-testid="stChatInput"] textarea').first.wait_for(
                 timeout=COLD_START_TIMEOUT_SEC * 1000
@@ -259,12 +293,12 @@ def main() -> int:
         except PWTimeout:
             print(
                 f"WARNING: chat input never appeared in {COLD_START_TIMEOUT_SEC}s. "
-                f"Open {APP_URL.rsplit('/', 1)[0]} and use the 'Manage' button "
+                f"Open {url.rsplit('/', 1)[0]} and use the 'Manage' button "
                 f"(bottom-left) to view logs."
             )
         time.sleep(3)
 
-        for q in QUERIES:
+        for q in queries:
             results.append(run_query(page, q))
 
         browser.close()
@@ -279,8 +313,8 @@ def main() -> int:
     log_path = out_dir / "e2e_streamlit_chair.log"
     with log_path.open("w") as f:
         f.write("RetailConcierge E2E chair test\n")
-        f.write(f"App: {APP_URL}\n")
-        f.write(f"Queries: {len(QUERIES)}\n\n")
+        f.write(f"App: {url}\n")
+        f.write(f"Queries: {len(queries)}\n\n")
         for r in results:
             f.write(f"Q: {r.query}\n")
             f.write(f"  time={r.elapsed_seconds}s cards={len(r.cards)} "
