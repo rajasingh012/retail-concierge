@@ -276,6 +276,11 @@ def _print_summary(results: list[Result]) -> None:
 
 def main() -> int:
     url = sys.argv[1] if len(sys.argv) > 1 else APP_URL
+    # Streamlit Cloud wraps apps in an iframe at /~/+/ that auth-redirects
+    # via the share URL. Bypass the wrapper by going direct.
+    if "streamlit.app" in url and "/~/" not in url:
+        url = url.rstrip("/") + "/~/+/"
+        print(f"using iframe-direct URL: {url}")
     queries = SHOPPING_QUERIES + HYBRID_QUERIES
     results: list[Result] = []
     with sync_playwright() as p:
