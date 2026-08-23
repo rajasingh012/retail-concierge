@@ -48,7 +48,7 @@ The five MAF tools, in the order the system prompt asks for:
 | `find_product_types` | LIKE-match against the `product_type` column, ordered by listing count. |
 | `find_brands` | Three-tier resolution: exact prefix → FTS5 → LIKE fallback. Handles misspellings and case. |
 | `search_catalog` | BM25 via FTS5, up to 50 candidates with optional product-type and max-dimension filters (no brand filter parameter; brand resolution happens in `find_brands`). Writes returned `item_id` values into `ctx.session.state['seen_item_ids']`. |
-| `search_vector` | Encodes the query with `sentence-transformers/all-MiniLM-L6-v2` (384-dim), KNN against `vec_items` virtual table via sqlite-vec `MATCH ... AND k = N`, returns up to 50 candidates with `item_id` + `distance`. Writes returned `item_id` values into the same `seen_item_ids` set. Joins against `listings` so the returned shape matches `search_catalog`. |
+| `search_vector` | Encodes the query with `BAAI/bge-small-en-v1.5` via fastembed (ONNX runtime, no torch dependency, 384-dim unit-norm), KNN against `vec_items` virtual table via sqlite-vec `MATCH ... AND k = N`, returns up to 50 candidates with `item_id` + `distance`. Writes returned `item_id` values into the same `seen_item_ids` set. Joins against `listings` so the returned shape matches `search_catalog`. |
 | `finalize_recommendations` | Reads `seen_item_ids` / `target_use` / `must_have` / `target_color` / `target_material` / etc. from `ctx.session.state`. First narrows proposed candidates via `apply_structured_filter` (LIKE on `listing_text_values`, only when the brief has color/material/etc.), then drops anything whose `item_id` was not seen by either `search_catalog` or `search_vector` this session, keeps only `exact_product`, applies deterministic multi-field ranking with the intent-match tie-breaker (and vector-distance tertiary tie-breaker), returns a `dict` payload. The `IntroBullet` recommendation list is built by the finalizer guard (`enforce_finalized_recommendation`) that runs after the tool returns. |
 
 Per-shopper memory lives on the MAF `AgentSession` object — `seen_item_ids`, `target_use`, `must_have`. The CLI creates one `AgentSession` and reuses it across turns; Streamlit's "New Session" button creates a fresh one. Tool-level state (catalog query cache, hits/misses) is module-level in `infrastructure/agent_tools.py` and shared across sessions — it is not per-shopper.
@@ -172,7 +172,7 @@ FTS5 returns BM25-ordered candidates with optional SQL filters for product type 
 
 ### Vector index (sqlite-vec)
 
-A second retrieval path stores 384-dim MiniLM-L6 embeddings for every active listing in a `vec_items` virtual table (sqlite-vec extension, brute-force KNN — adequate at demo scale, ~50ms across 145k rows). The index is built once via `scripts/build_vector_index.py` after `import_catalog.py`; the catalog is treated as immutable so there is no reindex path.
+A second retrieval path stores 384-dim BGE-small-en-v1.5 embeddings (BAAI/bge-small-en-v1.5, Apache-2.0) for every active listing in a `vec_items` virtual table (sqlite-vec extension, brute-force KNN — adequate at demo scale, ~50ms across 145k rows). The index is built once via `scripts/build_vector_index.py` after `import_catalog.py`; the catalog is treated as immutable so there is no reindex path.
 
 Embedding input per listing (built in SQL to avoid loading 11M text_value rows into Python):
 
@@ -187,7 +187,7 @@ LOWER(TRIM(
 
 Bullets and keywords carry the merchant's own natural-language description of the product — that's where the cleanest semantic signal lives. Title and brand are appendices. Empty / null values are skipped (the build script skips rows whose embedding text is empty to avoid polluting KNN with the mean vector).
 
-`search_vector` encodes the query with the same MiniLM-L6 model at tool-call time and runs `SELECT ... WHERE embedding MATCH ? AND k = N ORDER BY distance`. Cosine distance on unit-norm vectors is in [0, 2]; lower is better. The tool joins `vec_items` against `listings` to return the same listing-shape `search_catalog` does, so the rest of the agent pipeline is backend-agnostic.
+`search_vector` encodes the query with the same BGE-small-en-v1.5 model at tool-call time and runs `SELECT ... WHERE embedding MATCH ? AND k = N ORDER BY distance`. Cosine distance on unit-norm vectors is in [0, 2]; lower is better. The tool joins `vec_items` against `listings` to return the same listing-shape `search_catalog` does, so the rest of the agent pipeline is backend-agnostic.
 
 Both `search_catalog` and `search_vector` write the returned `item_id`s into the same `ctx.session.state['seen_item_ids']` set, so the provenance gate in `finalize_recommendations` works unchanged. The vector distance is recorded as a secondary tie-breaker in the ranker — it never overrides the BM25-first primary score.
 
