@@ -62,11 +62,11 @@ flowchart TD
   qcheck{blocking ambiguity?}
   question["concise question<br/>(only when must-have can't be silently relaxed)"]
   resolve["find_product_types / find_brands<br/>(canonicalize against catalog)"]
-  search["search_catalog (BM25)<br/>AND/OR search_vector (KNN)<br/>writes item_ids to session.state['seen_item_ids']"]
+  recall["search_catalog (BM25)<br/>AND search_vector (KNN)<br/>both mandatory on first turn;<br/>writes item_ids to session.state['seen_item_ids']"]
   classify["classify each item<br/>exact_product / accessory /<br/>unrelated / uncertain"]
-  filter["apply_structured_filter<br/>LIKE %term% on listing_text_values<br/>where brief has color/material/etc."]
-  finalize["finalize_recommendations<br/>• structured pre-filter (above)<br/>• provenance gate (drop ∉ session.state)<br/>• deterministic ranking<br/>• intent-match tie-breaker<br/>• vector-distance tertiary tie-breaker<br/>• audit-log entry"]
-  finalize2["enforce_finalized_recommendation<br/>• IntroBullet schema validation<br/>• phantom-item bullet strip<br/>• dataset_disclaimer append<br/>• CATALOG_NOTICE overwrite<br/>(runs after the tool returns)"]
+  filter["apply_structured_filter<br/>LIKE on listing_text_values<br/>when brief has color/material/etc.;<br/>no-op otherwise"]
+  flt["finalize_recommendations<br/>structured pre-filter (runs when filter active)<br/>provenance gate (drop items not in session.state)<br/>deterministic ranking<br/>intent-match tie-breaker<br/>vector-distance tertiary tie-breaker<br/>audit-log entry"]
+  guard["enforce_finalized_recommendation<br/>IntroBullet schema validation<br/>phantom-item bullet strip<br/>dataset_disclaimer append<br/>CATALOG_NOTICE overwrite<br/>(runs after the tool returns)"]
   out["protected ranked products<br/>+ typed IntroBullet list<br/>+ structured-filter audit trail<br/>+ evidence notes<br/>+ assumptions<br/>+ refinement chips<br/>+ audit-log entry"]
 
   user --> brief
@@ -74,11 +74,13 @@ flowchart TD
   qcheck -- "yes" --> question
   qcheck -- "no (Results first)" --> resolve
   question --> user
-  resolve --> search
-  search --> classify
-  classify --> finalize
-  finalize --> finalize2
-  finalize2 --> out
+  resolve --> recall
+  recall --> classify
+  classify --> filter
+  classify --> flt
+  filter --> flt
+  flt --> guard
+  guard --> out
   out --> user
 ```
 
