@@ -17,6 +17,8 @@ Covers:
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from domain.recommendation import (
@@ -95,6 +97,64 @@ def test_intro_bullet_rejects_intent_match_with_wrong_subject():
         IntroBullet(
             subject="item", claim_kind="intent_match", item_id="A1", text="x"
         )
+
+
+def test_coerce_intro_bullets_normalizes_item_intent_match():
+    """A model emitting (item, intent_match) must not invalidate the whole
+    response — the coercion layer rewrites the pair to (item, none).
+
+    The closed (subject, claim_kind) enums stay strict (see the test
+    above), but a single over-used claim kind on an item bullet is a
+    framing mistake, not a catalog fact. Normalizing at the coercion
+    layer keeps the schema contract intact while tolerating the model's
+    common output shape, so a bad bullet can't silently blank the UI.
+    """
+    from domain.recommendation import (
+        _coerce_intro_bullets,
+        RecommendationResponse,
+    )
+
+    bullets = _coerce_intro_bullets(
+        [
+            {"subject": "item", "claim_kind": "intent_match", "item_id": "A1", "text": "Matches your lumbar-support needs."},
+        ]
+    )
+    assert len(bullets) == 1
+    assert bullets[0].subject == "item"
+    assert bullets[0].claim_kind == "none"
+    assert bullets[0].item_id == "A1"
+
+    # And through the full response parse — the shape a live LLM turn hits.
+    rec = RecommendationResponse.model_validate_json(
+        json.dumps(
+            {
+                "kind": "recommendations",
+                "ranked": [{"rank": 1, "item_id": "A1"}],
+                "assumptions": [],
+                "notes": [],
+                "recommendation": [
+                    {"subject": "item", "claim_kind": "intent_match", "item_id": "A1", "text": "Matches."}
+                ],
+                "refinement_chips": [],
+                "catalog_notice": "This is an offline product catalog snapshot...",
+            }
+        )
+    )
+    assert rec.recommendation[0].claim_kind == "none"
+
+
+def test_coerce_intro_bullets_leaves_valid_pairs_unchanged():
+    """Valid (subject, claim_kind) pairs must pass through untouched."""
+    from domain.recommendation import _coerce_intro_bullets
+
+    bullets = _coerce_intro_bullets(
+        [
+            {"subject": "brief", "claim_kind": "intent_match", "text": "You wanted lumbar support."},
+            {"subject": "item", "claim_kind": "color", "item_id": "A1", "text": "Black mesh back."},
+            {"subject": "catalog_notice", "claim_kind": "dataset_disclaimer", "text": "Snapshot."},
+        ]
+    )
+    assert [b.claim_kind for b in bullets] == ["intent_match", "color", "dataset_disclaimer"]
 
 
 def test_intro_bullet_rejects_unknown_subject():

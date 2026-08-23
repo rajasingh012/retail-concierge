@@ -35,6 +35,7 @@ PROVIDERS: dict[str, tuple[str, str | None, dict[str, Any]]] = {
         "https://api.deepseek.com/v1",
         "DEEPSEEK_API_KEY",
         {
+            "temperature": 0.2,  # near-deterministic: tool-loop reliability > variety
             "extra_body": {
                 # Disable thinking for contract turns. DeepSeek defaults to
                 # thinking enabled with effort "high". When thinking is on

@@ -689,11 +689,13 @@ class ABOCatalogRepository:
             conn.execute("PRAGMA foreign_keys = ON")
             load_sqlite_vec(conn)
             # Build the WHERE clause for product_type if requested.
+            # Order of params MUST match placeholder order in the SQL below:
+            #   ? (MATCH), ? (k), then any ? from where_clauses.
             where_clauses: list[str] = []
             params: list[object] = [query, limit]
             if product_type:
                 where_clauses.append("AND l.product_type = ?")
-                params.insert(-1, product_type)
+                params.append(product_type)
 
             # KNN MATCH ... AND k = N returns the N closest rows.
             sql = f"""

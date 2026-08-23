@@ -201,6 +201,17 @@ def _coerce_intro_bullets(value: Any) -> list[IntroBullet]:
     Anything else returns ``[]`` so the agent loop can proceed; the
     renderer treats an empty list as "no intro" the same as an absent
     field.
+
+    Normalization applied before validation:
+
+    * ``{"subject": "item", "claim_kind": "intent_match", ...}`` is a
+      common model mistake — the schema restricts ``intent_match`` to
+      ``subject="brief"`` (the (subject, claim_kind) pair is locked).
+      The model means "this item matches your intent," which is a
+      framing bullet, not a new fact category. Coerce the pair to
+      ``(item, none)`` so the response validates instead of being
+      rejected wholesale. The closed enums stay closed; the coercion
+      layer absorbs the model's over-use of a claim kind.
     """
     if value is None:
         return []
@@ -210,18 +221,42 @@ def _coerce_intro_bullets(value: Any) -> list[IntroBullet]:
             return []
         return [IntroBullet(subject="brief", claim_kind="none", text=text)]
     if isinstance(value, dict):
-        return [IntroBullet.model_validate(value)]
+        return [IntroBullet.model_validate(_normalize_bullet(value))]
     if isinstance(value, list):
         bullets: list[IntroBullet] = []
         for item in value:
             if isinstance(item, IntroBullet):
                 bullets.append(item)
             elif isinstance(item, dict):
-                bullets.append(IntroBullet.model_validate(item))
+                bullets.append(IntroBullet.model_validate(_normalize_bullet(item)))
             elif isinstance(item, str) and item.strip():
                 return [IntroBullet(subject="brief", claim_kind="none", text=item.strip())]
         return bullets
     return []
+
+
+def _normalize_bullet(raw: dict[str, Any]) -> dict[str, Any]:
+    """Repair common model-output mistakes in a bullet dict before validation.
+
+    The schema's (subject, claim_kind) cross-field validator rejects
+    ``claim_kind="intent_match"`` on any subject other than ``"brief"``
+    (see :class:`IntroBullet`). Models routinely emit it on
+    ``subject="item"`` bullets to express "this product matches what you
+    asked for." That's a framing statement, not a catalog fact — the
+    closest legal claim kind is ``"none"``. Rewriting here keeps the
+    closed enum contract intact while making the parser tolerant of the
+    common mistake, so a single bad bullet can't invalidate the whole
+    response.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    subject = raw.get("subject")
+    claim_kind = raw.get("claim_kind")
+    if subject == "item" and claim_kind == "intent_match":
+        normalized = dict(raw)
+        normalized["claim_kind"] = "none"
+        return normalized
+    return raw
 
 
 _IntroBullets = Annotated[list[IntroBullet], BeforeValidator(_coerce_intro_bullets)]
