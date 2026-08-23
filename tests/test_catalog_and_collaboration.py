@@ -180,6 +180,7 @@ def test_shopping_agent_wires_tools_in_canonical_order(tmp_path: Path) -> None:
         "find_product_types",
         "find_brands",
         "search_catalog",
+        "search_vector",
         FINALIZE_RECOMMENDATIONS_TOOL,
     ]
     repo.close()
@@ -371,6 +372,7 @@ def test_multifield_ranking_uses_abo_signals() -> None:
         "brand_present",
         "dimension_present",
         "intent_match",
+        "vector_distance",
     }
 
 

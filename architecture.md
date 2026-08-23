@@ -44,11 +44,12 @@ The five MAF tools, in the order the system prompt asks for:
 
 | Tool | What it does |
 |---|---|
-| `extract_brief` | LLM fills a `ShoppingBrief` Pydantic model; tool body validates (typed currency / dimension / quantity conversion, vocabulary gate). Writes `target_use` and `must_have` into `ctx.session.state`. |
+| `extract_brief` | LLM fills a `ShoppingBrief` Pydantic model; tool body validates (typed currency / dimension / quantity conversion, vocabulary gate). Writes `target_use`, `must_have`, `target_color`, `target_material`, `target_pattern`, `target_finish_type`, `target_fabric_type`, `target_style` into `ctx.session.state`. |
 | `find_product_types` | LIKE-match against the `product_type` column, ordered by listing count. |
 | `find_brands` | Three-tier resolution: exact prefix → FTS5 → LIKE fallback. Handles misspellings and case. |
 | `search_catalog` | BM25 via FTS5, up to 50 candidates with optional product-type and max-dimension filters (no brand filter parameter; brand resolution happens in `find_brands`). Writes returned `item_id` values into `ctx.session.state['seen_item_ids']`. |
-| `finalize_recommendations` | Reads `seen_item_ids` / `target_use` / `must_have` from `ctx.session.state`. Drops candidates whose `item_id` was not seen by `search_catalog` in this session, keeps only `exact_product`, applies deterministic multi-field ranking with the intent-match tie-breaker, and returns a `dict` payload. The `IntroBullet` recommendation list is built by the finalizer guard (`enforce_finalized_recommendation`) that runs after the tool returns. |
+| `search_vector` | Encodes the query with `BAAI/bge-small-en-v1.5` via fastembed (ONNX runtime, no torch dependency, 384-dim unit-norm), KNN against `vec_items` virtual table via sqlite-vec `MATCH ... AND k = N`, returns up to 50 candidates with `item_id` + `distance`. Writes returned `item_id` values into the same `seen_item_ids` set. Joins against `listings` so the returned shape matches `search_catalog`. |
+| `finalize_recommendations` | Reads `seen_item_ids` / `target_use` / `must_have` / `target_color` / `target_material` / etc. from `ctx.session.state`. First narrows proposed candidates via `apply_structured_filter` (LIKE on `listing_text_values`, only when the brief has color/material/etc.), then drops anything whose `item_id` was not seen by either `search_catalog` or `search_vector` this session, keeps only `exact_product`, applies deterministic multi-field ranking with the intent-match tie-breaker (and vector-distance tertiary tie-breaker), returns a `dict` payload. The `IntroBullet` recommendation list is built by the finalizer guard (`enforce_finalized_recommendation`) that runs after the tool returns. |
 
 Per-shopper memory lives on the MAF `AgentSession` object — `seen_item_ids`, `target_use`, `must_have`. The CLI creates one `AgentSession` and reuses it across turns; Streamlit's "New Session" button creates a fresh one. Tool-level state (catalog query cache, hits/misses) is module-level in `infrastructure/agent_tools.py` and shared across sessions — it is not per-shopper.
 
@@ -57,15 +58,16 @@ Per-shopper memory lives on the MAF `AgentSession` object — `seen_item_ids`, `
 ```mermaid
 flowchart TD
   user(["user message / refinement"])
-  brief["extract_brief<br/>(LLM fills ShoppingBrief<br/>+ writes target_use, must_have to session.state)"]
+  brief["extract_brief<br/>(LLM fills ShoppingBrief<br/>+ writes target_use, must_have, target_color,<br/>target_material, etc. to session.state)"]
   qcheck{blocking ambiguity?}
   question["concise question<br/>(only when must-have can't be silently relaxed)"]
   resolve["find_product_types / find_brands<br/>(canonicalize against catalog)"]
-  search["search_catalog<br/>(BM25 + filters)<br/>writes item_ids to session.state"]
+  search["search_catalog (BM25)<br/>AND/OR search_vector (KNN)<br/>writes item_ids to session.state['seen_item_ids']"]
   classify["classify each item<br/>exact_product / accessory /<br/>unrelated / uncertain"]
-  finalize["finalize_recommendations<br/>• provenance gate (drop ∉ session.state)<br/>• deterministic ranking<br/>• intent-match tie-breaker<br/>• audit-log entry"]
+  filter["apply_structured_filter<br/>LIKE %term% on listing_text_values<br/>where brief has color/material/etc."]
+  finalize["finalize_recommendations<br/>• structured pre-filter (above)<br/>• provenance gate (drop ∉ session.state)<br/>• deterministic ranking<br/>• intent-match tie-breaker<br/>• vector-distance tertiary tie-breaker<br/>• audit-log entry"]
   finalize2["enforce_finalized_recommendation<br/>• IntroBullet schema validation<br/>• phantom-item bullet strip<br/>• dataset_disclaimer append<br/>• CATALOG_NOTICE overwrite<br/>(runs after the tool returns)"]
-  out["protected ranked products<br/>+ typed IntroBullet list<br/>+ evidence notes<br/>+ assumptions<br/>+ refinement chips<br/>+ audit-log entry"]
+  out["protected ranked products<br/>+ typed IntroBullet list<br/>+ structured-filter audit trail<br/>+ evidence notes<br/>+ assumptions<br/>+ refinement chips<br/>+ audit-log entry"]
 
   user --> brief
   brief --> qcheck
@@ -125,6 +127,7 @@ erDiagram
   LISTINGS ||--o{ LISTING_TEXT_VALUES : "has"
   LISTINGS ||--o{ LISTING_DIMENSIONS : "has"
   LISTINGS ||--|| LISTING_FTS : "indexed by"
+  LISTINGS ||--|| VEC_ITEMS : "indexed by"
 
   LISTINGS {
     INTEGER id PK
@@ -155,9 +158,50 @@ erDiagram
     string    brand_en
     INTEGER   content FK
   }
+  VEC_ITEMS {
+    string   item_id PK
+    blob     embedding
+  }
+  VEC_INDEX_META {
+    string key PK
+    string value
+  }
 ```
 
 FTS5 returns BM25-ordered candidates with optional SQL filters for product type and dimension. `search_catalog` records returned `item_id`s into the session's `ctx.session.state`; `finalize_recommendations` reads that state and drops anything not seen — invented IDs cannot reach the displayed list or the bullet list. The catalog carries no prices, ratings, popularity, or availability; the IntroBullet `claim_kind` enum reflects this. Implementation: `infrastructure/database.py`, `use_cases/ranking.py`.
+
+### Vector index (sqlite-vec)
+
+A second retrieval path stores 384-dim BGE-small-en-v1.5 embeddings (BAAI/bge-small-en-v1.5, Apache-2.0) for every active listing in a `vec_items` virtual table (sqlite-vec extension, brute-force KNN — adequate at demo scale, ~50ms across 145k rows). The index is built once via `scripts/build_vector_index.py` after `import_catalog.py`; the catalog is treated as immutable so there is no reindex path.
+
+Embedding input per listing (built in SQL to avoid loading 11M text_value rows into Python):
+
+```
+LOWER(TRIM(
+  title_en ||
+  '. ' || brand_en ||
+  '. ' || GROUP_CONCAT(first-3 bullet_point values, '. ') ||
+  ', ' || GROUP_CONCAT(first-5 item_keywords, ', ')
+))
+```
+
+Bullets and keywords carry the merchant's own natural-language description of the product — that's where the cleanest semantic signal lives. Title and brand are appendices. Empty / null values are skipped (the build script skips rows whose embedding text is empty to avoid polluting KNN with the mean vector).
+
+`search_vector` encodes the query with the same BGE-small-en-v1.5 model at tool-call time and runs `SELECT ... WHERE embedding MATCH ? AND k = N ORDER BY distance`. Cosine distance on unit-norm vectors is in [0, 2]; lower is better. The tool joins `vec_items` against `listings` to return the same listing-shape `search_catalog` does, so the rest of the agent pipeline is backend-agnostic.
+
+Both `search_catalog` and `search_vector` write the returned `item_id`s into the same `ctx.session.state['seen_item_ids']` set, so the provenance gate in `finalize_recommendations` works unchanged. The vector distance is recorded as a secondary tie-breaker in the ranker — it never overrides the BM25-first primary score.
+
+The `vec_index_meta` sidecar table records the model name, embedding dimension, and build timestamp so future-you can tell when the index was built and with what. Implementation: `scripts/build_vector_index.py`, `infrastructure/database.py` (`vec_items`, `vec_index_meta`, `encode_query`, `search_vector`).
+
+### Structured attribute filtering
+
+Industry-standard e-commerce pattern (Algolia, Bloomreach, Elastic, Amazon's hybrid search): recall candidates from BM25 + vector are pre-filtered against structured attributes (color, material, pattern, finish_type, fabric_type, style) via SQL `LIKE` matching against `listing_text_values.value`. The catalog IS the synonym dictionary — user-typed "red" returns every listing whose `color` value contains "red" as a substring. New merchant-written color names are covered automatically without a curated synonym list.
+
+`ShoppingBrief` carries optional `color`, `material`, `pattern`, `finish_type`, `fabric_type`, `style` fields. The LLM populates them from the user's words in `extract_brief`; `extract_brief` writes them to `ctx.session.state['target_color']`, `target_material`, etc. `finalize_recommendations` reads these and calls `repository.apply_structured_filter(candidates, color=..., material=..., ...)`. The filter narrows the proposed candidate list to those matching every specified attribute via `LIKE %term%` on `listing_text_values` — candidates that don't match are dropped (not down-ranked: a sofa that isn't red is not "less relevant," it's a misread).
+
+This is a pre-filter, not a post-filter or embedding-into-vector pattern. Embedding attribute values into the vector pollutes the semantic space with attribute NAMES ("color:") and degrades recall for queries that don't specify those attributes. Post-filter loses recall — top-50 vector hits may not include enough "red velvet" matches to fill the result list. Pre-filter on selective attributes (color=maroon at 0.2% of the catalog) is what production search engines do. Implementation: `infrastructure/structured_filter.py`, `infrastructure/database.py` (`apply_structured_filter`), `use_cases/shopping_agent.py` (finalize pre-filter step).
+
+The filter does NOT embed into the vector and does NOT alter the ranking weights. It runs in the `finalize_recommendations` tool, before `screen_and_rank_candidates`, and reports the filtered-out IDs in the audit log so the provenance story stays intact.
 
 ## Misspelling, foreign-language, and paraphrase handling
 

@@ -255,4 +255,84 @@ def build_tools(
             lambda: json.dumps(candidates, ensure_ascii=False),
         )
 
-    return [find_product_types, find_brands, search_catalog]
+    @tool(
+        name="search_vector",
+        description=(
+            "Semantic KNN search over the catalog using sqlite-vec. Use as a "
+            "complement to search_catalog when the user's query is phrased in "
+            "natural language, contains synonyms, paraphrases, or misspellings "
+            "that BM25 keyword matching would miss (e.g. 'couch' for 'sofa', "
+            "'earphones' for 'headphones'). Returns up to 50 candidates ranked "
+            "by cosine distance to the query embedding."
+        ),
+    )
+    def search_vector(
+        ctx: Annotated[FunctionInvocationContext, "MAF context (excluded from schema)"],
+        query: Annotated[
+            str,
+            Field(
+                description=(
+                    "Natural-language search text — typically the same "
+                    "search_terms you would pass to search_catalog, plus any "
+                    "key color/material words. Encoded with BGE-small-en-v1.5 "
+                    "and matched against the catalog via sqlite-vec KNN."
+                )
+            ),
+        ],
+        product_type: Annotated[
+            str,
+            Field(description="Exact value returned by find_product_types or empty"),
+        ] = "",
+        limit: Annotated[
+            int,
+            Field(description="Candidate-pool size; clamped to 1-50"),
+        ] = 50,
+    ) -> str:
+        """Semantic KNN search over the catalog via the sqlite-vec extension.
+
+        The query string is encoded with the same BGE-small-en-v1.5 model
+        that built the index at ``scripts/build_vector_index.py`` time.
+        Candidates are ranked by cosine distance; lower is better.
+
+        Returned ``item_id`` values are written into
+        ``ctx.session.state['seen_item_ids']`` exactly like ``search_catalog``
+        does, so the provenance gate in ``finalize_recommendations`` works
+        unchanged. Each candidate dict carries ``retrieval_backend='vector'``
+        so callers can tell which path produced it (useful for the bench and
+        for debugging).
+        """
+        safe_limit = clamp_limit(limit, default=50, maximum=50)
+        key = json.dumps(
+            [repo_namespace, "search_vector", query, product_type, safe_limit],
+            ensure_ascii=False,
+        )
+        candidates: list[dict] = []
+        try:
+            query_vec = repository.encode_query(query)
+            hits = repository.search_vector(
+                query_vec, limit=safe_limit, product_type=product_type
+            )
+            candidates = hits
+        except RuntimeError as exc:
+            # sqlite-vec not loaded or vec_items not populated. Return a clear
+            # empty result so the agent falls back to search_catalog instead
+            # of crashing the tool loop.
+            return json.dumps(
+                {"error": str(exc), "candidates": []}, ensure_ascii=False
+            )
+
+        _record_observed(ctx, candidates)
+        item_ids = [
+            c.get("item_id") for c in candidates if isinstance(c, dict) and c.get("item_id")
+        ]
+        _audit(
+            "search_vector",
+            {"query": query, "product_type": product_type, "limit": safe_limit},
+            {"result_count": len(candidates), "item_ids": item_ids},
+        )
+        return _cached(
+            key,
+            lambda: json.dumps(candidates, ensure_ascii=False),
+        )
+
+    return [find_product_types, find_brands, search_catalog, search_vector]

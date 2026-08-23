@@ -50,6 +50,7 @@ def get_agent():
         provider=provider,
         audit_logger=audit_logger,
         catalog_vocabulary=catalog_vocabulary,
+        repository=repo,
     )
 
     stats = repo.stats()
@@ -142,7 +143,14 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant" and isinstance(msg.get("content"), dict):
             rec = msg["content"]
-            st.markdown(f"**{rec.get('recommendation', 'Here are my recommendations:')}**")
+            bullets = rec.get("recommendation") or []
+            if bullets:
+                for b in bullets:
+                    text = b.text if hasattr(b, "text") else str(b)
+                    if text.strip():
+                        st.markdown(f"**{text}**")
+            else:
+                st.markdown("Here are my recommendations:")
             for item in rec.get("ranked", []):
                 _render_card(item)
             if rec.get("assumptions"):
