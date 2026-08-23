@@ -165,6 +165,7 @@ async def run_chat() -> None:
         provider=provider,
         audit_logger=audit_logger,
         catalog_vocabulary=catalog_vocabulary,
+        repository=repository,
     )
     session = agent.create_session()
     stats = repository.stats()

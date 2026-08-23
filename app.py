@@ -50,6 +50,7 @@ def get_agent():
         provider=provider,
         audit_logger=audit_logger,
         catalog_vocabulary=catalog_vocabulary,
+        repository=repo,
     )
 
     stats = repo.stats()
