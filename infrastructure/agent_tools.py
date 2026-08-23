@@ -274,8 +274,8 @@ def build_tools(
                 description=(
                     "Natural-language search text — typically the same "
                     "search_terms you would pass to search_catalog, plus any "
-                    "key color/material words. Encoded with MiniLM-L6 and "
-                    "matched against the catalog via sqlite-vec KNN."
+                    "key color/material words. Encoded with BGE-small-en-v1.5 "
+                    "and matched against the catalog via sqlite-vec KNN."
                 )
             ),
         ],
@@ -290,9 +290,9 @@ def build_tools(
     ) -> str:
         """Semantic KNN search over the catalog via the sqlite-vec extension.
 
-        The query string is encoded with the same MiniLM-L6 model that built
-        the index at ``scripts/build_vector_index.py`` time. Candidates are
-        ranked by cosine distance; lower is better.
+        The query string is encoded with the same BGE-small-en-v1.5 model
+        that built the index at ``scripts/build_vector_index.py`` time.
+        Candidates are ranked by cosine distance; lower is better.
 
         Returned ``item_id`` values are written into
         ``ctx.session.state['seen_item_ids']`` exactly like ``search_catalog``
